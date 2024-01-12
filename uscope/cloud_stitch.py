@@ -5,6 +5,7 @@ from uscope import config
 from uscope.util import writej
 import datetime
 import json
+import glob
 
 
 class CSInfo:
@@ -28,7 +29,7 @@ class CSInfo:
         self._id_key = id_key
         self._notification_email = notification_email
 
-    def is_plausible(self):
+    def check_plausible(self):
         if not self._access_key:
             raise ValueError("Requires access_key")
         if not self._secret_key:
@@ -37,6 +38,13 @@ class CSInfo:
             raise ValueError("Requires id_key")
         if not self._notification_email:
             raise ValueError("Requires notification_email")
+
+    def is_plausible(self):
+        try:
+            self.check_plausible()
+            return True
+        except ValueError:
+            return False
 
     def access_key(self, required=True):
         if required and not self._access_key:
@@ -68,7 +76,7 @@ def upload_dir(directory,
 
     if not cs_info:
         cs_info = CSInfo()
-    cs_info.is_plausible()
+    cs_info.check_plausible()
 
     if not os.path.isdir(directory):
         raise ValueError("Need a directory")
@@ -90,14 +98,19 @@ def upload_dir(directory,
                       aws_access_key_id=cs_info.access_key(),
                       aws_secret_access_key=cs_info.secret_key())
 
-    for root, _, files in os.walk(directory):
-        for file in sorted(files):
-            if running is not None and not running.is_set():
-                raise Exception("Upload interrupted")
-            verbose and log('Uploading {} to {}/{} '.format(
-                os.path.join(root, file), S3BUCKET, DEST_DIR + '/' + file))
-            s3.upload_file(os.path.join(root, file), S3BUCKET,
-                           DEST_DIR + '/' + file)
+    # uploading too much junk
+    # do simple glob for now
+    #for root, _, files in os.walk(directory):
+    for src_fn in sorted(
+            list(glob.glob(os.path.join(directory, "*.jpg"))) +
+            list(glob.glob(os.path.join(directory, "*.tif"))) +
+            list(glob.glob(os.path.join(directory, "*.json")))):
+        if running is not None and not running.is_set():
+            raise Exception("Upload interrupted")
+        dst_fn = DEST_DIR + '/' + os.path.basename(src_fn)
+        verbose and log('Uploading {} to {}/{} '.format(
+            src_fn, S3BUCKET, dst_fn))
+        s3.upload_file(src_fn, S3BUCKET, dst_fn)
 
     serverj = {
         "email": cs_info.notification_email(),
@@ -106,6 +119,9 @@ def upload_dir(directory,
     if bc.labsmore_stitch_use_xyfstitch():
         serverj["task"] = "mosaic_xyf_stitch"
         serverj["container"] = "mosaic_xyf_stitcher"
+
+    if bc.labsmore_stitch_save_cloudshare():
+        serverj["cloudshare"] = "true"
 
     MOSAIC_RUN_CONTENT = json.dumps(serverj)
     print("up", MOSAIC_RUN_CONTENT)

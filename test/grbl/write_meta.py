@@ -10,8 +10,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Write pyuscope metadata to GRBL controller")
     add_bool_arg(parser, "--verbose", default=False, help="Verbose output")
-    parser.add_argument("--comment", help="Comment. 9 chars max")
-    parser.add_argument("--sn", help="Serial number. 9 chars max")
+    parser.add_argument("--comment", help="Comment. 8 chars max")
+    parser.add_argument("--sn", help="Serial number. 8 chars max")
     parser.add_argument("--microscope",
                         help="Microscope config file name to hash")
     add_bool_arg(parser, "--delete", default=False, help="Delete metadata")
@@ -54,7 +54,7 @@ def main():
         if comment is None:
             comment = info.get("comment")
         if config is None:
-            config = info.get("config", b"\x00\x00\x00\x00")
+            config = info.get("config")
         print("Writing")
         grbl_write_meta(grbl.gs, comment=comment, sn=sn, config=config)
 

@@ -73,6 +73,7 @@ Original "pr0nscope" mk2 BH2 CNC microscope
         "source":"gst-toupcamsrc",
         "width": 5440,
         "height": 3648,
+        "native_pixel_pitch_um": 2.4,
         "source_properties": {
             "esize": 0
         },
@@ -83,6 +84,8 @@ Original "pr0nscope" mk2 BH2 CNC microscope
                 "max": 200000
             },
         },
+    },
+    "optics": {
         "um_per_pixel_raw_1x": 3.011029412,
     },
 

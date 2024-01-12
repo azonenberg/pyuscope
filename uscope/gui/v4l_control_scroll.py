@@ -48,7 +48,7 @@ class V4L2AutoExposureDisplayer(ICSDisplayer):
         # print("cb toggled")
         # Race conditon?
         if not self.config["gui_driven"]:
-            print("not gui driven")
+            # print("not gui driven")
             return
         self.cs.disp_prop_write(self.config["disp_name"], self.cb.isChecked())
 
@@ -78,15 +78,18 @@ class V4L2AutoExposureDisplayer(ICSDisplayer):
         else:
             return 1
 
+    def setVisible(self, val):
+        self.cb.setVisible(val)
+
 
 class V4L2ControlScroll(ImagerControlScroll):
-    def __init__(self, vidpip, usc=None, parent=None, groups_gst=None):
+    def __init__(self, vidpip, ac=None, parent=None, groups_gst=None):
         assert groups_gst is not None
         self.vidpip = vidpip
         self.all_controls = None
         ImagerControlScroll.__init__(self,
                                      groups=self.flatten_groups(groups_gst),
-                                     usc=usc,
+                                     ac=ac,
                                      parent=parent)
 
         layout = QVBoxLayout()
@@ -151,6 +154,13 @@ class V4L2ControlScroll(ImagerControlScroll):
         return self.disp_prop_read(
             self.get_auto_exposure_disp_property()) == AUTO_EXPOSURE_VAL
 
+    def auto_color_enabled(self):
+        prop = "Auto White Balance Temperature"
+        if prop not in self.all_controls:
+            # maybe?
+            return False
+        return bool(self.disp_prop_read(prop))
+
     def set_exposure(self, n):
         self.disp_prop_write(self.get_exposure_disp_property(), n)
 
@@ -179,7 +189,7 @@ class V4L2ControlScroll(ImagerControlScroll):
             self.set_gui_driven(not value,
                                 disp_names=["White Balance Temperature"])
 
-    def validate_raw_name(self, prop_config):
+    def validate_prop_config(self, prop_config):
         if prop_config["prop_name"] in self.all_controls:
             return True
         if prop_config.get("optional", False):

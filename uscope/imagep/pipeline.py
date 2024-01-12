@@ -18,6 +18,7 @@ from uscope.imagep.util import EtherealImageR, EtherealImageW
 from uscope.imagep.streams import StreamCSIP, DirCSIP, SnapshotCSIP
 from uscope.imagep.plugins import get_plugins, get_plugin_ctors
 from uscope import config
+from uscope.microscope import get_virtual_microscope, get_mconfig
 
 import os
 import glob
@@ -29,6 +30,7 @@ import multiprocessing
 import threading
 import queue
 import tempfile
+import json
 
 
 def get_open_set(working_iindex):
@@ -62,10 +64,11 @@ class CSImageProcessorThread(threading.Thread):
         self.simple_idle = threading.Event()
         self.simple_idle.set()
         self.queue_in = queue.Queue()
-        self.queue_out = queue.Queue()
+        # self.queue_out = queue.Queue()
 
         # Each thrread gets its own set of correction engines
-        self.plugins = get_plugins(log=self.log)
+        self.plugins = get_plugins(log=self.log,
+                                   microscope=self.csip.microscope)
         self.running.set()
 
     def stop(self):
@@ -95,7 +98,7 @@ class CSImageProcessorThread(threading.Thread):
 
             def finish_command(result, info):
                 out = (ip_params, result, info)
-                self.queue_out.put(out)
+                # self.queue_out.put(out)
                 if ip_params.tb:
                     ip_params.tb.callback()
                 if ip_params.callback:
@@ -169,8 +172,9 @@ Probably would need to make this a thread to handle that
 
 
 class CSImageProcessor(threading.Thread):
-    def __init__(self, nthreads=None, log=None):
+    def __init__(self, nthreads=None, log=None, microscope=None):
         super().__init__()
+        self.microscope = microscope
         if log is None:
 
             def log(s):
@@ -178,7 +182,7 @@ class CSImageProcessor(threading.Thread):
 
         self.log = log
         self.queue_in = queue.Queue()
-        self.queue_out = queue.Queue()
+        # self.queue_out = queue.Queue()
         self.running = threading.Event()
         self.ready = threading.Event()
         self.workers = OrderedDict()
@@ -195,9 +199,13 @@ class CSImageProcessor(threading.Thread):
         self.running.set()
 
     def __del__(self):
-        self.stop()
+        self.shutdown()
 
-    def stop(self):
+    def shutdown(self):
+        self.shutdown_request()
+        self.shutdown_join()
+
+    def shutdown_request(self):
         self.running.clear()
 
         if self.workers:
@@ -205,10 +213,13 @@ class CSImageProcessor(threading.Thread):
             for worker in self.workers.values():
                 worker.stop()
             self.log("Shutting down: joining")
-            for worker in self.workers.values():
-                worker.join()
-            self.workers = None
 
+    def shutdown_join(self, timeout=3.0):
+        for worker in self.workers.values():
+            worker.join(timeout=timeout)
+        self.log("Joined")
+
+        # Now that threads are destroyed get rid of temp files
         if self.temp_dir_object:
             # shutil.rmtree(self.temp_dir)
             self.temp_dir_object.cleanup()
@@ -373,14 +384,16 @@ class CSImageProcessor(threading.Thread):
         return healthy
 
     def process_stream(self, *args, **kwargs):
-        StreamCSIP(self, *args, **kwargs).run()
+        StreamCSIP(self, *args, microscope=self.microscope, **kwargs).run()
 
     def process_snapshots(self, *args, **kwargs):
-        return SnapshotCSIP(self, *args, **kwargs).run()
+        options = kwargs.pop("options", {})
+        return SnapshotCSIP(self, *args, microscope=self.microscope,
+                            **kwargs).run(options)
 
     # was run_dir
     def process_dir(self, *args, **kwargs):
-        DirCSIP(self, *args, **kwargs).run()
+        DirCSIP(self, *args, microscope=self.microscope, **kwargs).run()
 
     def run(self):
         if not self.running.is_set():
@@ -401,27 +414,67 @@ class CSImageProcessor(threading.Thread):
                     worker.queue_command(ip_params)
 
 
+def microscope_name_from_scan_dir(directory, mconfig):
+    """
+    If user arguments haven't already set, set the default microscope from uscan.json
+    Intended for CLI processing applications
+    """
+    scan_fn = os.path.join(directory, "uscan.json")
+    if os.path.exists(scan_fn):
+        with open(scan_fn) as f:
+            scanj = json.load(f)
+        microscopej = scanj.get("microscope")
+        if microscopej:
+            mconfig["name"] = microscopej["name"]
+            serial = microscopej.get("serial")
+            if serial:
+                mconfig["serial"] = serial
+        # 2023-12-09: old style
+        else:
+            mconfig["name"] = scanj["pconfig"]["app"]["microscope"]
+        print(f"Scan taken with microscope {mconfig['name']}")
+
+
 # was run_dir
-def process_dir(directory, *args, nthreads=None, **kwargs):
-    # If a microscope hasn't been specified yet
-    config.lazy_load_microscope_from_config(directory)
+def process_dir(directory,
+                *args,
+                nthreads=None,
+                microscope=None,
+                microscope_name=None,
+                **kwargs):
+    if microscope is None:
+        mconfig = {}
+        if microscope_name:
+            mconfig["name"] = microscope_name
+        else:
+            microscope_name_from_scan_dir(directory, mconfig)
+
+        microscope = get_virtual_microscope(mconfig=mconfig)
 
     ip = None
     try:
-        ip = CSImageProcessor(nthreads=nthreads)
+        ip = CSImageProcessor(nthreads=nthreads, microscope=microscope)
         ip.start()
         ip.ready.wait(1.0)
         ip.process_dir(directory, *args, **kwargs)
     finally:
         if ip:
-            ip.stop()
+            ip.shutdown()
     del ip
 
 
-def process_snapshots(images, *args, nthreads=None, **kwargs):
+def process_snapshots(images,
+                      *args,
+                      nthreads=None,
+                      microscope=None,
+                      mconfig=None,
+                      **kwargs):
+    if microscope is None:
+        microscope = get_virtual_microscope(mconfig=mconfig)
+
     ip = None
     try:
-        ip = CSImageProcessor(nthreads=nthreads)
+        ip = CSImageProcessor(nthreads=nthreads, microscope=microscope)
         ip.start()
         # nothing to process => can try to shutdown before it starts
         ip.ready.wait(1.0)

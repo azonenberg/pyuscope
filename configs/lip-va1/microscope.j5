@@ -103,10 +103,13 @@ Camera: see VM1B config ifle
         "source_properties": {
             //"device": "/dev/video4"
         },
+        "native_width": 3840,
+        "native_height": 2160,
         "width": 1280,
         "height": 960,
-        //1.5x
         /*
+        2023-11-19: issues are actually the camera filters, not the optics
+        Give the full field of view
         "crop_pixels": {
             "top": 0,
             "bottom": 0,
@@ -115,6 +118,9 @@ Camera: see VM1B config ifle
         },
         */
 
+        "videoflip_method": "rotate-180",
+    },
+    "optics": {
         //spec sheet says
         //Pixel size: 2um(H) x 2um(V)
 
@@ -126,11 +132,10 @@ Camera: see VM1B config ifle
         //value is between about 8.8 and 10 depending on zoom level
         //TODO: calibrate scale more proper
         "um_per_pixel_raw_1x": 9.4,
-        "videoflip_method": "rotate-180",
     },
     "ipp": {
         /*
-        "pipeline_last": [
+        "snapshot_correction": [
             {"plugin": "correct-vm1v1", "dir": "vm1v1"},
         ],
         */

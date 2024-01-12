@@ -1,21 +1,18 @@
 from uscope import cloud_stitch
-from uscope.scan_util import index_scan_images, bucket_group, reduce_iindex_filename
-import os
+from uscope.scan_util import index_scan_images, bucket_group, reduce_iindex_filename, is_tif_scan
 from uscope import config
-from uscope.imagep.util import TaskBarrier, EtherealImageR, EtherealImageW
+from uscope.imagep.util import TaskBarrier, EtherealImageR, EtherealImageW, remove_intermediate_directories
+from uscope.imagep.summary import write_html_viewer, write_snapshot_grid, write_quick_pano
+from uscope.util import writej
 import glob
-import json
+import shutil
+import os
 """
 Support the following:
 -Planner running
 -GUI stand alone operations (ex: a single focus stack)
 -From filesystem?
 """
-
-
-def need_jpg_conversion(working_dir):
-    fns = glob.glob(working_dir + "/*.tif")
-    return bool(fns)
 
 
 def get_image_suffix(dir_in):
@@ -77,6 +74,45 @@ Can tolerate partial captures (ex: bad stacking)
 """
 
 
+class IPPConfigJ:
+    def __init__(self, j=None):
+        self.j = j
+
+    def snapshot_correction(self):
+        # Usually snapshots are already corrected during normal imaging
+        return bool(self.j.get("snapshot_correction", False))
+
+    def cloud_stitch(self):
+        return bool(self.j.get("cloud_stitch", True))
+
+    def write_html_viewer(self):
+        """
+        Write a simple .html file at the final image level
+        Its not so much stitched as plastered together
+        """
+        # Very little disk space, easy to distinguish from other image files
+        # Turn on by default
+        return bool(self.j.get("write_html_viewer", True))
+
+    def write_snapshot_grid(self):
+        """
+        Write a simple combined image file at the final image level
+        There is a gutten between snapshots
+        """
+        return bool(self.j.get("write_snapshot_grid", False))
+
+    def write_quick_pano(self):
+        """
+        Write a simple combined image file at the final image level
+        Its not so much stitched as plastered together based on estimated positions
+        """
+        # This takes up disk space => off by default
+        return bool(self.j.get("write_quick_pano", False))
+
+    def keep_intermediates(self):
+        return bool(self.j.get("keep_intermediates", False))
+
+
 class DirCSIP:
     def __init__(self,
                  csip,
@@ -87,8 +123,11 @@ class DirCSIP:
                  fix=False,
                  best_effort=True,
                  ewf=None,
+                 configj={},
+                 microscope=None,
                  verbose=True):
         self.csip = csip
+        self.microscope = microscope
         self.log = csip.log
         self.directory = directory
         self.cs_info = cs_info
@@ -98,6 +137,7 @@ class DirCSIP:
         # FIXME:
         # self.ewf = ewf
         self.best_effort = best_effort
+        self.ipp_config = IPPConfigJ(configj)
         self.verbose = verbose
 
     def run_n_to_1(self,
@@ -197,12 +237,25 @@ class DirCSIP:
         working_iindex = index_scan_images(self.directory)
         dst_basename = os.path.basename(os.path.abspath(self.directory))
 
-        config.lazy_load_microscope_from_config(self.directory)
-
-        print("Microscope: %s" % (config.default_microscope_name(), ))
-        print("  Has FF cal: %s" % config.get_usc().imager.has_ff_cal())
+        print("Microscope: %s" % (self.microscope.name, ))
+        print("Serial: %s" % (self.microscope.serial(), ))
+        print("Has FF cal: %s" % config.get_usc().imager.has_ff_cal())
 
         self.log("")
+
+        ipp = config.get_usc().ipp.pipeline_first()
+        if len(ipp) == 0:
+            self.log("Pre corrections: skip")
+        else:
+            for pipeline_this in ipp:
+                plugin = pipeline_this["plugin"]
+                this_dir = pipeline_this["dir"]
+                self.log(f"{plugin}: start")
+                next_dir = os.path.join(working_iindex["dir"], this_dir)
+                self.correct_plugin_run(pipeline_this,
+                                        iindex_in=working_iindex,
+                                        dir_out=next_dir)
+                working_iindex = index_scan_images(next_dir)
 
         if working_iindex["stabilization"]:
             self.log("Stabilization: yes. Processing")
@@ -237,43 +290,47 @@ class DirCSIP:
         Now apply custom correction plugins
         TODO: let the user actually determine order for these...ff1 before stack, etc
         """
-        ipp = config.get_usc().ipp.pipeline_last()
-        if len(ipp) == 0:
-            self.log("Post corrections: skip")
-        else:
-            for pipeline_this in ipp:
-                plugin = pipeline_this["plugin"]
-                this_dir = pipeline_this["dir"]
-                self.log(f"{plugin}: start")
-                next_dir = os.path.join(working_iindex["dir"], this_dir)
-                self.correct_plugin_run(pipeline_this,
-                                        iindex_in=working_iindex,
-                                        dir_out=next_dir)
-                working_iindex = index_scan_images(next_dir)
-                print("Finishing")
+        if self.ipp_config.snapshot_correction():
+            ipp = config.get_usc().ipp.snapshot_correction()
+            if len(ipp) == 0:
+                self.verbose and self.log("Post corrections: skip")
+            else:
+                for pipeline_this in ipp:
+                    plugin = pipeline_this["plugin"]
+                    this_dir = pipeline_this["dir"]
+                    self.verbose and self.log(f"{plugin}: start")
+                    next_dir = os.path.join(working_iindex["dir"], this_dir)
+                    self.correct_plugin_run(pipeline_this,
+                                            iindex_in=working_iindex,
+                                            dir_out=next_dir)
+                    working_iindex = index_scan_images(next_dir)
 
         if not config.get_usc().imager.has_ff_cal():
-            self.log("FF correction: skip")
+            self.verbose and self.log("FF correction: skip")
         else:
-            self.log("FF correction: start")
+            self.verbose and self.log("FF correction: start")
             next_dir = os.path.join(working_iindex["dir"], "ff1")
             self.correct_ff1_run(iindex_in=working_iindex, dir_out=next_dir)
             working_iindex = index_scan_images(next_dir)
 
-        # CloudStitch currently only supports .jpg
-        if need_jpg_conversion(working_iindex["dir"]):
-            self.log("")
-            self.log("Converting to jpg")
-            next_dir = os.path.join(working_iindex["dir"], "jpg")
-            # runs inline, not parallelized
-            self.csip.tif2jpg_dir(iindex_in=working_iindex,
-                                  dir_out=next_dir,
-                                  lazy=self.lazy)
-            working_iindex = index_scan_images(next_dir)
+        if self.ipp_config.write_html_viewer():
+            self.verbose and self.log("Writing HTML viewer")
+            if is_tif_scan(working_iindex["dir"]):
+                # Only Safari supports .tif
+                self.log("WARNING: HTML viewer only works reliably with jpg")
+            write_html_viewer(working_iindex)
 
-        self.log("")
+        if self.ipp_config.write_snapshot_grid():
+            self.verbose and self.log("Writing tile image")
+            write_snapshot_grid(working_iindex)
+
+        if self.ipp_config.write_quick_pano():
+            self.verbose and self.log("Writing quick pano")
+            write_quick_pano(working_iindex)
+
+        self.verbose and self.log("")
         healthy = self.csip.inspect_final_dir(working_iindex)
-        self.log("")
+        self.verbose and self.log("")
 
         if not healthy and self.best_effort:
             if not self.fix:
@@ -283,40 +340,90 @@ class DirCSIP:
             next_dir = os.path.join(working_iindex["dir"], "fix")
             self.fix_dir(working_iindex, next_dir)
             working_iindex = index_scan_images(next_dir)
-            self.log("")
-            self.log("re-inspecting new dir")
+            self.verbose and self.log("")
+            self.verbose and self.log("re-inspecting new dir")
             healthy = self.csip.inspect_final_dir(working_iindex)
             assert healthy
             self.log("")
 
+        outj = {
+            "type": "processing",
+        }
+        writej(os.path.join(self.directory, "processing.json"), outj)
+
+        if not self.ipp_config.keep_intermediates():
+            remove_intermediate_directories(self.directory,
+                                            working_iindex["dir"])
+            next_dir = self.directory
+            working_iindex = index_scan_images(next_dir)
+
         if not self.upload:
-            self.log("CloudStitch: skip (requested)")
+            self.log("CloudStitch: skip (requested by CLI)")
+        elif not self.ipp_config.cloud_stitch():
+            self.log("CloudStitch: skip (requested by JSON policy)")
         elif not healthy:
             self.log("CloudStitch: skip (incomplete data)")
         elif not self.cs_info and not config.get_bc(
         ).labsmore_stitch_aws_access_key():
             self.log("CloudStitch: skip (missing credidentials)")
+        elif len(working_iindex["images"]) == 1:
+            self.log("CloudStitch: skip (only one image)")
         else:
-            self.log("Ready to stitch " + working_iindex["dir"])
-            cloud_stitch.upload_dir(working_iindex["dir"],
-                                    cs_info=self.cs_info,
-                                    dst_basename=dst_basename,
-                                    verbose=self.verbose)
+            delete_jpg_dir = None
+            main_dir = working_iindex["dir"]
+
+            # CloudStitch currently only supports .jpg
+            if is_tif_scan(working_iindex["dir"]):
+                self.log("")
+                self.log("Converting to jpg")
+                next_dir = os.path.join(working_iindex["dir"], "jpg_tmp")
+                delete_jpg_dir = next_dir
+                # runs inline, not parallelized
+                self.csip.tif2jpg_dir(iindex_in=working_iindex,
+                                      dir_out=next_dir,
+                                      lazy=self.lazy)
+                working_iindex = index_scan_images(next_dir)
+
+            try:
+                self.log("Ready to stitch " + working_iindex["dir"])
+                cloud_stitch.upload_dir(working_iindex["dir"],
+                                        cs_info=self.cs_info,
+                                        dst_basename=dst_basename,
+                                        verbose=self.verbose)
+                # Pop the log file up to main dir before deleting tmp dir
+                if delete_jpg_dir:
+                    shutil.move(
+                        os.path.join(working_iindex["dir"],
+                                     "cloud_stitch.json"),
+                        os.path.join(main_dir, "cloud_stitch.json"))
+            finally:
+                if delete_jpg_dir:
+                    shutil.rmtree(delete_jpg_dir, ignore_errors=True)
 
 
 class SnapshotCSIP:
-    def __init__(self, csip, images, best_effort=True, verbose=True):
+    def __init__(self,
+                 csip,
+                 images,
+                 best_effort=True,
+                 microscope=None,
+                 verbose=False):
         self.csip = csip
         self.log = csip.log
         self.images = images
         self.best_effort = best_effort
         self.verbose = verbose
+        self.microscope = microscope
 
-    def run(self):
-        self.log("Microscope: %s" % (config.default_microscope_name(), ))
-        self.log("  Has FF cal: %s" % config.get_usc().imager.has_ff_cal())
+    def run(self, options):
+        # TODO: Write this part
+        self.verbose and self.log("SnapshotCSIP verbose")
+        self.verbose and self.log("Microscope: %s" % (self.microscope.name, ))
+        self.verbose and self.log("Serial: %s" % (self.microscope.serial(), ))
+        self.verbose and self.log(
+            "Has FF cal: %s" % config.get_usc().imager.has_ff_cal())
 
-        self.log("")
+        self.verbose and self.log("")
 
         current_images = self.images
 
@@ -342,29 +449,34 @@ class SnapshotCSIP:
         assert len(current_images) == 1
         current_image = current_images[0]
 
-        ipp = config.get_usc().ipp.pipeline_last()
+        ipp = config.get_usc().ipp.snapshot_correction()
+        current_plugins = [p["plugin"] for p in ipp]
+        for plugin in options.get("plugins", []):
+            if plugin not in current_plugins:
+                ipp.append({"plugin": plugin})
         if len(ipp) == 0:
-            self.log("Post corrections: skip")
+            self.verbose and self.log("Post corrections: skip")
         else:
             for pipeline_this in ipp:
                 plugin = pipeline_this["plugin"]
-                self.log(f"{plugin}: start")
+                self.verbose and self.log(f"{plugin}: start")
                 tb = TaskBarrier()
                 data_out = self.csip.queue_1_to_1_plugin(plugin=plugin,
                                                          im_in=current_image,
                                                          want_im_out=True,
-                                                         tb=tb)
+                                                         tb=tb,
+                                                         options=options)
                 tb.wait()
                 current_image = data_out["image"].get_im()
 
         if not config.get_usc().imager.has_ff_cal():
-            self.log("FF correction: skip")
+            self.verbose and self.log("FF correction: skip")
         else:
-            self.log("FF correction: start")
+            self.verbose and self.log("FF correction: start")
             tb = TaskBarrier()
-            self.csip.queue_correct_ff1(im_in=current_image,
-                                        want_im_out=True,
-                                        tb=tb)
+            data_out = self.csip.queue_correct_ff1(im_in=current_image,
+                                                   want_im_out=True,
+                                                   tb=tb)
             tb.wait()
             current_image = data_out["image"].get_im()
 
@@ -383,10 +495,11 @@ If it fails you'll need to fall back to DirCSIP
 
 
 class StreamCSIP:
-    def __init__(self, csip, image_stream, upload=False):
+    def __init__(self, csip, image_stream, microscope=None, upload=False):
         assert 0, "WIP"
         self.csip = csip
         self.image_stream = image_stream
+        self.microscope = microscope
 
         # TODO: auto figure this out
         # Might also want to move these to be objects

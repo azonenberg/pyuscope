@@ -1,14 +1,17 @@
+from uscope.imager.imager_util import format_mm_3dec
+
 import subprocess
 import shutil
 import traceback
 import tempfile
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 import glob
 import os
 import math
 from uscope import config
 import cv2
+from pathlib import Path
 """
 ImageProcessing plugin
 """
@@ -19,7 +22,12 @@ class IPPlugin:
     Thread safe: no
     If you want to do multiple in parallel create multiple instances
     """
-    def __init__(self, log=None, need_tmp_dir=False, default_options={}):
+    def __init__(self,
+                 log=None,
+                 need_tmp_dir=False,
+                 default_options={},
+                 microscope=None):
+        self.microscope = microscope
         if not log:
 
             def log(s):
@@ -83,12 +91,15 @@ class IPPlugin:
 
 
 class HDREnfusePlugin(IPPlugin):
-    def __init__(self, log, default_options={}):
+    def __init__(self, log, default_options={}, microscope=None):
         super().__init__(log=log,
+                         microscope=microscope,
                          default_options=default_options,
                          need_tmp_dir=True)
+        self.enfuse = config.get_bc().enfuse_cli()
 
     def _run(self, data_in, data_out, options={}):
+        assert self.enfuse, "Requires enfuse"
         ewf = options.get("ewf", "gaussian")
         best_effort = options.get("best_effort", False)
         out_fn = data_out["image"].get_filename()
@@ -120,16 +131,22 @@ Currently skips align
 
 
 class StackEnfusePlugin(IPPlugin):
-    def __init__(self, log, default_options={}):
+    def __init__(self, log, default_options={}, microscope=None):
         super().__init__(log=log,
+                         microscope=microscope,
                          default_options=default_options,
                          need_tmp_dir=True)
         # X1 has "perfect" axes
         # Other systems have a lot of jitter
         self.align = self.usc.ipp.get_plugin("stack-enfuse").get(
             "align", False)
+        self.enfuse = config.get_bc().enfuse_cli()
+        self.align_image_stack = config.get_bc().align_image_stack_cli()
 
     def _run(self, data_in, data_out, options={}):
+        assert self.enfuse, "Requires enfuse"
+        if self.align:
+            assert self.align_image_stack, "Requires align_image_stack"
         best_effort = options.get("best_effort", False)
 
         def check_call(args):
@@ -163,10 +180,9 @@ class StackEnfusePlugin(IPPlugin):
         prefix = "aligned_"
         if self.align:
             # Always output as .tif
-            args = [
+            args = list(self.align_image_stack) + [
                 # is there a reason to use -i vs -x -y?
                 # -x -y is more explicit, let's do that for now
-                "align_image_stack",
                 "-l",
                 "-x",
                 "-y",
@@ -186,8 +202,8 @@ class StackEnfusePlugin(IPPlugin):
                 image_in.to_filename_tif(fn_aligned)
 
         out_fn = data_out["image"].get_filename()
-        args = [
-            "enfuse", "--exposure-weight=0", "--saturation-weight=0",
+        args = list(self.enfuse) + [
+            "--exposure-weight=0", "--saturation-weight=0",
             "--contrast-weight=1", "--hard-mask", "--output=" + out_fn
         ]
         # 2023-10-25, quick experiment, didn't seem to work
@@ -208,8 +224,9 @@ class StackEnfusePlugin(IPPlugin):
 
 
 class StabilizationPlugin(IPPlugin):
-    def __init__(self, log, default_options={}):
+    def __init__(self, log, default_options={}, microscope=None):
         super().__init__(log=log,
+                         microscope=microscope,
                          default_options=default_options,
                          need_tmp_dir=True)
 
@@ -236,8 +253,9 @@ Correct uneven illumination using a flat field mask
 
 
 class CorrectFF1Plugin(IPPlugin):
-    def __init__(self, log, default_options={}):
+    def __init__(self, log, default_options={}, microscope=None):
         super().__init__(log=log,
+                         microscope=microscope,
                          default_options=default_options,
                          need_tmp_dir=True)
         # Plugin is always registered
@@ -368,9 +386,10 @@ Sharpen image using a kernel
 
 
 class CorrectSharp1Plugin(IPPlugin):
-    def __init__(self, log, default_options={}):
+    def __init__(self, log, default_options={}, microscope=None):
         self.kernel = None
         super().__init__(log=log,
+                         microscope=microscope,
                          default_options=default_options,
                          need_tmp_dir=True)
         """
@@ -408,9 +427,10 @@ Work around this by:
 
 
 class CorrectVM1V1Plugin(IPPlugin):
-    def __init__(self, log, default_options={}):
+    def __init__(self, log, default_options={}, microscope=None):
         self.kernel = None
         super().__init__(log=log,
+                         microscope=microscope,
                          default_options=default_options,
                          need_tmp_dir=True)
         psf_test = [
@@ -466,7 +486,7 @@ class CorrectVM1V1Plugin(IPPlugin):
     def _run(self, data_in, data_out, options={}):
         assert self.kernel is not None
 
-        print(f"VM1-1: run")
+        self.verbose and print(f"VM1-1: run")
         pil_im = data_in["image"].to_im()
         cv_im = np.array(pil_im.convert('RGB'))[:, :, ::-1].copy()
 
@@ -493,6 +513,105 @@ class CorrectVM1V1Plugin(IPPlugin):
                     [int(cv2.IMWRITE_JPEG_QUALITY), 90])
 
 
+class AnnotateScalebarPlugin(IPPlugin):
+    def __init__(self, log, default_options={}, microscope=None):
+        super().__init__(log=log,
+                         microscope=microscope,
+                         default_options=default_options,
+                         need_tmp_dir=True)
+        current_script_path = Path(__file__).resolve()
+        project_path = current_script_path.parents[2]
+        self.font_path = str(project_path) + "/fonts/Roboto/Roboto-Regular.ttf"
+        assert Path(self.font_path).is_file(
+        ), f"The file {self.font_path} does not exist."
+
+    def _run(self, data_in, data_out, options={}):
+        self.constant_text = "Labsmore.com"
+        self.font_size = 25
+        self.additional_text_distance_from_scalebar = 20
+
+        pil_im = data_in["image"].to_im()
+        width, original_height = pil_im.size
+        # self.scalebar_x_start = 10
+        self.scalebar_x_start = int(width * 0.05)
+        self.scalebar_y_start = int(width * 0.01)
+        # self.short_line_length = 10
+        self.short_line_length = int(width * 0.025)
+        self.scalebar_length = int(width * 0.15)
+        # self.line_width = 5
+        self.line_width = int(width * 0.005)
+        black_rectangle_height = int(original_height * 0.12)
+
+        new_image_height = original_height + black_rectangle_height
+
+        modified_image = Image.new("RGB", (width, new_image_height),
+                                   color="black")
+
+        modified_image.paste(pil_im, (0, 0))
+
+        draw = ImageDraw.Draw(modified_image)
+        font = ImageFont.truetype(self.font_path, self.font_size)
+        scalebar_y = new_image_height - black_rectangle_height // 2
+
+        def draw_bar():
+            draw.line([
+                self.scalebar_x_start, scalebar_y,
+                self.scalebar_x_start + self.scalebar_length, scalebar_y
+            ],
+                      fill="white",
+                      width=self.line_width)
+
+            draw.line([
+                self.scalebar_x_start, scalebar_y - self.short_line_length,
+                self.scalebar_x_start, scalebar_y + self.short_line_length
+            ],
+                      fill="white",
+                      width=self.line_width)
+            draw.line([
+                self.scalebar_x_start + self.scalebar_length,
+                scalebar_y - self.short_line_length, self.scalebar_x_start +
+                self.scalebar_length, scalebar_y + self.short_line_length
+            ],
+                      fill="white",
+                      width=self.line_width)
+
+        def draw_scale_text():
+            # TODO: indicate how well calibrated the system is
+            um_per_pixel = float(
+                options.get("objective_config", {}).get("um_per_pixel", "0"))
+            if um_per_pixel > 0.0:
+                # print("um_per_pixel", um_per_pixel, "length", self.scalebar_length)
+                scale_text = format_mm_3dec(self.scalebar_length *
+                                            um_per_pixel / 1000)
+            else:
+                scale_text = "Missing calibration"
+
+            scale_text_width, scale_text_height = draw.textsize(
+                scale_text, font)
+            scale_text_position = (
+                self.scalebar_x_start +
+                (self.scalebar_length - scale_text_width) // 2, scalebar_y -
+                int(scale_text_height * 1.2) - self.scalebar_y_start)
+            draw.text(scale_text_position, scale_text, font=font, fill="white")
+            return scale_text
+
+        def draw_labsmore(scale_text):
+            additional_text_position = (
+                self.scalebar_x_start + self.scalebar_length +
+                self.additional_text_distance_from_scalebar,
+                scalebar_y - font.getsize(scale_text)[1] // 2)
+            draw.text(additional_text_position,
+                      self.constant_text,
+                      font=font,
+                      fill="white")
+
+        draw_bar()
+        scale_text = draw_scale_text()
+        draw_labsmore(scale_text)
+
+        modified_image.save(data_out["image"].get_filename(), quality=90)
+
+
 def get_plugin_ctors():
     return {
         "stack-enfuse": StackEnfusePlugin,
@@ -501,8 +620,12 @@ def get_plugin_ctors():
         "correct-ff1": CorrectFF1Plugin,
         "correct-sharp1": CorrectSharp1Plugin,
         "correct-vm1v1": CorrectVM1V1Plugin,
+        "annotate-scalebar": AnnotateScalebarPlugin,
     }
 
 
-def get_plugins(log=None):
-    return {k: v(log=log) for k, v in get_plugin_ctors().items()}
+def get_plugins(log=None, microscope=None):
+    return {
+        k: v(log=log, microscope=microscope)
+        for k, v in get_plugin_ctors().items()
+    }

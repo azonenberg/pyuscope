@@ -3,6 +3,8 @@ from uscope.imager.imager import Imager
 import os
 from collections import OrderedDict
 from uscope.util import time_str
+from uscope.motion.motion_util import parse_move
+import threading
 
 
 class AxisExceeded(ValueError):
@@ -604,8 +606,26 @@ class MotionHAL:
         self.ask_home = self.default_ask_home
         self.home_progress = self.default_home_progress
 
+        self.check_threads = self.microscope.bc.check_threads()
+        self.motion_thread = None
+        if self.check_threads:
+            print(f"Motion {self} ({type(self)}): checking threads requested")
+
     def __del__(self):
         self.close()
+
+    def updte_motion_thread(self):
+        self.motion_thread = threading.get_ident()
+        if self.check_threads:
+            print(
+                f"Motion {self} ({type(self)}): checking threads enabled with {self.motion_thread}"
+            )
+
+    def check_thread_safety(self):
+        if self.check_threads and self.motion_thread:
+            assert self.motion_thread == threading.get_ident(), (
+                "GUI thread unsafe access detected", self.main_thread,
+                threading.get_ident())
 
     def default_ask_home(self):
         while True:
@@ -672,10 +692,26 @@ class MotionHAL:
             self.axes_abs(axes)
         return axes
 
+    def check_valid_position(self, pos):
+        self.validate_axes(pos)
+        limits = self.get_soft_limits()
+        for axis, axpos in pos.items():
+            axmin = limits["mins"].get(axis)
+            axmax = limits["maxs"].get(axis)
+            if axmin is None or axmax is None:
+                continue
+            if not self.axis_pos_in_range(axis, axmin, axpos, axmax):
+                raise AxisExceeded(
+                    "axis %s: out of range %0.3f <= got %0.3f <= %0.3f" %
+                    (axis, axmin, axpos, axmax))
+
     def _get_machine_limits(self):
         return {"mins": {}, "maxs": {}}
 
     def _get_steps_per_mm(self):
+        """
+        These values are always positive / relative
+        """
         return {
             "x": int(1 / 0.000010),
             "y": int(1 / 0.000010),
@@ -765,7 +801,8 @@ class MotionHAL:
 
             self._epsilon = {}
             for axis in self.axes():
-                self._epsilon[axis] = 1 / self._steps_per_mm[axis]
+                self._epsilon[axis] = abs(1 / self._steps_per_mm[axis])
+            self.assert_all_axes(self._epsilon)
 
         calc_epsilon()
 
@@ -956,6 +993,12 @@ class MotionHAL:
         have = set(self.axes())
         assert axes == have, (f"expected axes {have}, but was given {axes}")
 
+    def validate_axes(self, axes):
+        for axis in axes:
+            if axis not in self.axes():
+                raise ValueError("Got axis %s but expect axis in %s" %
+                                 (axis, self.axes()))
+
     def home(self):
         '''Set current position to 0.0'''
         raise Exception("Required for tuning")
@@ -973,7 +1016,8 @@ class MotionHAL:
     def pos(self):
         '''Return current position for all axes'''
         # print("")
-        pos = self._pos()
+        self.check_thread_safety()
+        pos = self.only_used_axes(self._pos())
         self.process_pos(pos)
         return pos
 
@@ -983,7 +1027,8 @@ class MotionHAL:
 
     def move_absolute(self, pos, options={}):
         '''Absolute move to positions specified by pos dict'''
-        assert self.jog_estimated_end is None, "Can't move while jogging"
+        assert self.jog_estimated_end is None, f"Can't move while jogging ({self.jog_estimated_end})"
+        self.check_thread_safety()
         if len(pos) == 0:
             return
         self.validate_axes(pos.keys())
@@ -993,6 +1038,7 @@ class MotionHAL:
 
     def _move_absolute_wrap(self, pos, options={}):
         '''Absolute move to positions specified by pos dict'''
+        pos = dict(pos)
         try:
             for modifier in self.iter_active_modifiers():
                 modifier.move_absolute_pre(pos, options=options)
@@ -1006,6 +1052,9 @@ class MotionHAL:
     def _move_absolute(self, pos):
         '''Absolute move to positions specified by pos dict'''
         raise NotSupported("Required for planner")
+
+    def move_absolute_str(self, pos, options={}):
+        self.move_absolute(parse_move(pos), options=options)
 
     def update_backlash(self, cur_pos, abs_pos):
         pass
@@ -1051,11 +1100,8 @@ class MotionHAL:
         '''Relative move to positions specified by delta dict'''
         raise NotSupported("Required for planner")
 
-    def validate_axes(self, axes):
-        for axis in axes:
-            if axis not in self.axes():
-                raise ValueError("Got axis %s but expect axis in %s" %
-                                 (axis, self.axes()))
+    def move_relative_str(self, pos, options={}):
+        self.move_relative(parse_move(pos), options=options)
 
     def jog_rel(self, axes, rate, options={}, keep_pos_cache=False):
         """
@@ -1161,6 +1207,7 @@ class MotionHAL:
         period: how often commands will be issued
             longer period => jog further to keep constant
         """
+        self.check_thread_safety()
         # print("")
         # print("jog_fractioned", axes, period, time.time())
         tstart = time.time()
@@ -1232,6 +1279,7 @@ class MotionHAL:
         raise NotSupported("Required for jogging")
 
     def jog_cancel(self):
+        self.check_thread_safety()
         self._jog_cancel()
         # No longer jogging
         self.jog_estimated_end = None
@@ -1291,6 +1339,13 @@ class MotionHAL:
         Machine dependent definition, but generally a single line of g-code
         Some machines only support binary => may be not supported
         """
+        raise NotSupported("")
+
+    def apply_damper(self, damper):
+        self.check_thread_safety()
+        self._apply_damper(damper)
+
+    def _apply_damper(self, damper):
         raise NotSupported("")
 
 
@@ -1357,6 +1412,9 @@ class MockHal(MotionHAL):
         Print some high level debug info
         """
         self.log("Motion: no additional info")
+
+    def apply_damper(self, damper):
+        pass
 
 
 """

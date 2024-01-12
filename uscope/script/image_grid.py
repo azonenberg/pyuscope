@@ -1,19 +1,22 @@
-from uscope.app.argus.scripting import ArgusScriptingPlugin
+from uscope.gui.scripting import ArgusScriptingPlugin
 import os
 
 
 class Plugin(ArgusScriptingPlugin):
     def input_config(self):
         return {
-            "Mode": {
-                "widget": "QComboBox",
-                "values": ["Setup: lower left", "Setup: upper right", "Run"],
-                "default": "Setup: lower left"
+            "Buttons": {
+                "widget": "QPushButtons",
+                "buttons": {
+                    # Set the widget name to update
+                    "Set lower left": "Lower left",
+                    "Set upper right": "Upper right",
+                },
             },
             "Output directory": {
                 "widget": "QLineEdit",
                 "type": str,
-                "default": "image_grid"
+                "default": "data/script/image_grid"
             },
             "X sites": {
                 "widget": "QLineEdit",
@@ -40,6 +43,11 @@ class Plugin(ArgusScriptingPlugin):
                 "values": ["Yes", "No"],
                 "default": "No"
             },
+            "Overwrite": {
+                "widget": "QComboBox",
+                "values": ["Yes", "No"],
+                "default": "No"
+            },
         }
 
     def mode_run(self,
@@ -48,12 +56,16 @@ class Plugin(ArgusScriptingPlugin):
                  y_sites,
                  lower_left,
                  upper_right,
-                 autofocus=False):
+                 autofocus=False,
+                 overwrite=False):
 
         self.log(f"Saving to {output_directory}")
         if os.path.exists(output_directory):
             # if not self.message_box_yes_cancel("Start?", "Output directory already exists. Are you sure you want to continue"):
             #     return
+            if not overwrite:
+                self.log("Aborted: refusing to overwrite existing directory")
+                return
             self.log("WARNING: output directory already exists")
         else:
             os.mkdir(output_directory)
@@ -80,26 +92,24 @@ class Plugin(ArgusScriptingPlugin):
                 self.move_absolute(pos)
                 if autofocus:
                     self.autofocus()
-                filename = os.path.join(output_directory,
-                                        "c%03u_r%03u.jpg" % (col, row))
+                filename = os.path.join(
+                    output_directory,
+                    "c%03u_r%03u%s" % (col, row, self.image_save_extension()))
                 image = self.image()
-                image.save(filename)
+                image.save(filename, quality=95)
                 self.log(f"Saved {filename}")
         self.log("Return to lower left")
         self.move_absolute(lower_left)
         self.log("Done")
 
     def run_test(self):
-        self.log("Hello, world!")
         vals = self.get_input()
-        mode = vals["Mode"]
-        if mode == "Setup: lower left":
-            self.set_input_default("Lower left",
+        button = vals.get("button")
+        if button:
+            self.set_input_default(button["value"],
                                    self.position_format(self.pos()))
-        elif mode == "Setup: upper right":
-            self.set_input_default("Upper right",
-                                   self.position_format(self.pos()))
-        elif mode == "Run":
+        else:
+            self.log("Checking parameters...")
             if not vals["Output directory"]:
                 self.log("Output directory required")
                 return
@@ -110,6 +120,5 @@ class Plugin(ArgusScriptingPlugin):
                 lower_left=self.position_parse(vals["Lower left"]),
                 upper_right=self.position_parse(vals["Upper right"]),
                 autofocus=vals["Autofocus"] == "Yes",
+                overwrite=vals["Overwrite"] == "Yes",
             )
-        else:
-            assert 0, f"bad mode {mode}"

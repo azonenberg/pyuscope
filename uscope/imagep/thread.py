@@ -1,6 +1,6 @@
 from uscope.imager.autofocus import choose_best_image
 from uscope.imager.imager_util import get_scaled
-from uscope.imagep.pipeline import process_snapshots
+from uscope.imagep.pipeline import CSImageProcessor
 from uscope.imager.autofocus import Autofocus
 from uscope.threads import CommandThreadBase
 
@@ -16,8 +16,26 @@ class ImageProcessingThreadBase(CommandThreadBase):
         super().__init__(microscope)
         self.command_map = {
             "auto_focus": self._do_auto_focus,
-            "process_snapshot": self._do_process_snapshot,
+            "process_image": self._do_process_image,
         }
+
+        self.ip = None
+        self.ip = CSImageProcessor(microscope=microscope)
+        self.ip.start()
+        # nothing to process => can try to shutdown before it starts
+        self.ip.ready.wait(1.0)
+
+    def shutdown_request(self):
+        # Stop requests first
+        super().shutdown_request()
+        # Then lower level engine
+        self.ip.shutdown_request()
+
+    def shutdown_join(self, timeout=3.0):
+        # Stop requests first
+        super().shutdown_join(timeout=timeout)
+        # Then lower level engine
+        self.ip.shutdown_join(timeout=timeout)
 
     def auto_focus(self, objective_config, block=False, done=None):
         j = {
@@ -40,14 +58,19 @@ class ImageProcessingThreadBase(CommandThreadBase):
             self.log("Autofocus cancelled")
             raise
 
-    def process_snapshot(self, options, block=False, callback=None):
+    def process_image(self, options, block=False, callback=None):
+        # if "objective_config" not in options:
+        #    options["objective_config"] = self.ac.objective_config()
+        assert "objective_config" in options, options
         j = {
             #"type": "process_snapshot",
             "options": options,
         }
-        self.command("process_snapshot", j, block=block, callback=callback)
+        self.command("process_image", j, block=block, callback=callback)
 
-    def _do_process_snapshot(self, j):
+    # TODO: move more of this to the image processing thread
+    # rotate, scaling
+    def _do_process_image(self, j):
         options = j["options"]
         image = get_scaled(options["image"],
                            options["scale_factor"],
@@ -65,7 +88,12 @@ class ImageProcessingThreadBase(CommandThreadBase):
             assert videoflip_method == "rotate-180"
             image = image.rotate(180)
 
-        image = process_snapshots([image])
+        try:
+            image = self.ip.process_snapshots([image], options=options)
+        except Exception as e:
+            traceback.print_exc()
+            self.log(f"WARNING; snapshot processing crashed: {e}")
+            return None
 
         if "save_filename" in options:
             kwargs = {}

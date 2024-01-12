@@ -565,7 +565,7 @@ class PointGenerator3P(PlannerPlugin):
         if self.pc.j["points-xy3p"].get("refocus", False):
             self.refocus_corners(corners)
         assert len(corners) == 3
-        pos0 = self.planner.motion.pos()
+        #pos0 = self.planner.motion.pos()
         self.corners = {}
         self.ax_min = {}
         self.ax_max = {}
@@ -576,19 +576,19 @@ class PointGenerator3P(PlannerPlugin):
             # Fill in a dummy consistent value to make matrix solve
             # It will be dropped during moves
             # Its also accurate in the telemetry
-            if not self.tracking_z:
-                corner["z"] = pos0["z"]
+            #if not self.tracking_z and "z" in pos0:
+            #    corner["z"] = pos0["z"]
             self.log("  %s x=%0.3f, y=%0.3f, z=%0.3f" %
-                     (cornerk, corner["x"], corner["y"], corner["z"]))
+                     (cornerk, corner["x"], corner["y"], corner.get("z", 0)))
             self.corners[cornerk] = corner
-            for ax in "xyz":
+            for ax in self.motion.axes():
                 self.ax_min[ax] = min(self.ax_min.get(ax, +float('inf')),
                                       corner[ax])
                 self.ax_max[ax] = max(self.ax_max.get(ax, -float('inf')),
                                       corner[ax])
 
         self.log("Bounding box")
-        for axis in "xyz":
+        for axis in self.motion.axes():
             self.log("  %c: %0.3f to %0.3f" %
                      (axis, self.ax_min[axis], self.ax_max[axis]))
 
@@ -663,7 +663,7 @@ class PointGenerator3P(PlannerPlugin):
         # Dependence of x on col
         self.per_col = {}
         self.per_row = {}
-        for axis in "xyz":
+        for axis in self.motion.axes():
 
             def corner_trim(corner):
                 """
@@ -702,7 +702,7 @@ class PointGenerator3P(PlannerPlugin):
 
     def calc_pos(self, ll_col, ll_row):
         ret = {}
-        for axis in "xyz":
+        for axis in self.motion.axes():
             # Project from corner
             # Adjust from center of imager
             offset = self.corners["ll"][axis]
@@ -785,7 +785,7 @@ class PointGenerator3P(PlannerPlugin):
         axes = {}
         for axisc, axis in self.axes.items():
             axes[axisc] = axis.meta()
-        meta["points-xy2p"] = {
+        meta["points-xy3p"] = {
             'points_to_generate': self.points_expected(),
             'points_generated': self.itered_xy_points,
             "points": points,
@@ -1021,7 +1021,7 @@ class PlannerHDR(PlannerPlugin):
             self.log("HDR: setting %s" % (hdrv, ))
             if not self.dry:
                 self.imager.set_properties(hdrv)
-                time.sleep(self.tsettle)
+                self.sleep(self.tsettle)
             modifiers = {
                 "filename_part": "h%02u" % hdri,
             }
@@ -1067,7 +1067,7 @@ class PlannerImageStabilization(PlannerPlugin):
             # TODO: figure out a reasonable time here
             # Needs to be > 0 to have some time for vibration to move
             if pointi and not self.dry:
-                time.sleep(0.1)
+                self.sleep(0.1)
 
             modifiers = {
                 "filename_part": self.filename_part(pointi),
@@ -1137,13 +1137,10 @@ class PlannerCaptureImage(PlannerPlugin):
                 self.planner.imager.take()
             else:
                 tstart = time.time()
-                images = self.planner.imager.get()
+                im = self.planner.imager.get_processed()
                 tend = time.time()
                 self.verbose and self.log(
                     "FIXME TMP: actual capture took %0.3f" % (tend - tstart, ))
-
-                assert len(images) == 1, "Expecting single image"
-                im = list(images.values())[0]
 
         final_wh_hint = self.pc.image_final_wh_hint()
         if im and final_wh_hint is not None:

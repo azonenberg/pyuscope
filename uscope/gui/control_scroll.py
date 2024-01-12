@@ -6,8 +6,6 @@ from PyQt5.QtWidgets import *
 import os
 
 from collections import OrderedDict
-
-from uscope import config
 """
 Some properties are controlled via library
 Some are driven via GUI
@@ -202,16 +200,15 @@ High level notes:
 
 
 class ImagerControlScroll(QScrollArea):
-    def __init__(self, groups, usc, verbose=False, parent=None):
+    def __init__(self, groups, ac, verbose=False, parent=None):
         QScrollArea.__init__(self, parent=parent)
-        if usc is None:
-            usc = config.get_usc()
-        self.usc = usc
+        self.ac = ac
         self.first_update = True
         self.verbose = verbose
         # self.verbose = True
         self.log = lambda x: print(x)
         self.groups = groups
+        self.optional_disp_props = set()
 
         self.layout = QVBoxLayout()
         self.layout.addLayout(self.buttonLayout())
@@ -224,6 +221,12 @@ class ImagerControlScroll(QScrollArea):
         self.disp2element = OrderedDict()
         # Indexed by low level name
         self.raw2element = OrderedDict()
+
+        # Used for saving / restoring state
+        # In particular to restore if the camera disconnects
+        # (or maybe save on exit)
+        self.raw_cache = {}
+        self.disp_cache = {}
 
     def post_imager_ready(self):
         """
@@ -241,8 +244,14 @@ class ImagerControlScroll(QScrollArea):
             row = 0
             groupbox.setLayout(layoutg)
 
-            for _disp_name, prop in properties.items():
-                if not self.validate_raw_name(prop):
+            for _raw_name, prop in properties.items():
+                # TODO: should load this earlier?
+                # currently cal is loaded after this
+                if prop.get("optional", True):
+                    disp_name = prop.get("disp_name", prop["prop_name"])
+                    # self.optional_raw_props.add(raw_name)
+                    self.optional_disp_props.add(disp_name)
+                if not self.validate_prop_config(prop):
                     continue
                 # assert disp_name == prop["disp_name"]
                 row = self._assemble_property(prop, layoutg, row)
@@ -261,7 +270,7 @@ class ImagerControlScroll(QScrollArea):
     def buttonLayout(self):
         layout = QHBoxLayout()
 
-        bc = config.get_bc()
+        bc = self.ac.microscope.bc
         self.cam_default_pb = None
         if bc.dev_mode():
             self.cam_default_pb = QPushButton("Camera default")
@@ -308,6 +317,13 @@ class ImagerControlScroll(QScrollArea):
         assert prop_name not in self.raw2element
         self.raw2element[prop_name] = element
 
+        # Normal users don't need to change these
+        # but its needed to configure the camera
+        # See https://github.com/Labsmore/pyuscope/issues/274
+        # Ex: hflip/vflip
+        if not prop.get("visible", True):
+            element.setVisible(self.ac.microscope.bc.dev_mode())
+
         return row
 
     def refresh_defaults(self):
@@ -342,8 +358,17 @@ class ImagerControlScroll(QScrollArea):
         for disp_name, val in vals.items():
             try:
                 element = self.disp2element[disp_name]
-            except:
+            except KeyError:
+                # Not present on this system?
+                # Ignore it
+                # Likely loaded calibration not applicable in this case
+                if disp_name in self.optional_disp_props:
+                    continue
+
+                print("")
+                print("disp_name not found", disp_name)
                 print("Widget properites:", self.disp2element.keys())
+                print("Optional properties", self.optional_disp_props)
                 print("Set properites:", vals)
                 raise
             # Rely on GUI signal writing API unless GUI updates are disabled
@@ -368,14 +393,20 @@ class ImagerControlScroll(QScrollArea):
         Update state based on camera API
         Query all GUI controlled properties and update GUI to reflect current state
         """
-        for disp_name, val in self.get_disp_properties().items():
-            # print("Should update %s: %s" % (disp_name, self.disp2element[disp_name]["push_prop"]))
-            element = self.disp2element[disp_name]
-            # Force GUI to take readback values on first update
-            if not element.config["gui_driven"] or self.first_update:
-                element.disp_property_set_widgets(
-                    val, first_update=self.first_update)
-        self.first_update = False
+        try:
+            for disp_name, val in self.get_disp_properties().items():
+                # print("Should update %s: %s" % (disp_name, self.disp2element[disp_name]["push_prop"]))
+                element = self.disp2element[disp_name]
+                # Force GUI to take readback values on first update
+                if not element.config["gui_driven"] or self.first_update:
+                    element.disp_property_set_widgets(
+                        val, first_update=self.first_update)
+            self.first_update = False
+        # 2023-12-17
+        # VM1 / UVC issue trying to chase down
+        # Can we recover or do we need to re-open the camera?
+        except OSError:
+            self.log("WARNING: camera bad file descriptor on read")
 
     def update_by_cam_defaults(self):
         """
@@ -432,6 +463,7 @@ class ImagerControlScroll(QScrollArea):
         self.verbose and print(f"raw_prop_write() {name} = {value}")
         self._raw_prop_write(name, value)
         self.raw_prop_written(name, value)
+        self.raw_cache[name] = value
 
     def raw_prop_read(self, name, default=False):
         """
@@ -440,6 +472,7 @@ class ImagerControlScroll(QScrollArea):
         ret = self._raw_prop_read(name)
         self.verbose and print(f"raw_prop_read() {name} = {ret}")
         self.raw_prop_was_read(name, ret)
+        self.raw_cache[name] = ret
         return ret
 
     def _raw_prop_write(self, name, value):
@@ -459,13 +492,34 @@ class ImagerControlScroll(QScrollArea):
     def disp_prop_read(self, disp_name):
         element = self.disp2element[disp_name]
         raw = self.raw_prop_read(element.config["prop_name"])
-        return element.val_raw2disp(raw)
+        ret = element.val_raw2disp(raw)
+        self.disp_cache[disp_name] = ret
+        return ret
 
     def disp_prop_write(self, disp_name, disp_val):
         element = self.disp2element[disp_name]
         raw_val = element.val_disp2raw(disp_val)
         # print("translate to raw val", raw_val)
         self.raw_prop_write(element.config["prop_name"], raw_val)
+        self.disp_cache[disp_name] = disp_val
+
+    def get_prop_cache(self):
+        return {
+            "disp": dict(self.disp_cache),
+            "raw": dict(self.raw_cache),
+        }
+
+    def recover_video_crash(self, prop_cache):
+        """
+        Its unclear the best way to deal with this
+        Think just write everything and let the GUI update is best
+        Assume for now that only disp properties are needed
+
+        Assumes that all properties are contained in prop_cache
+        We could also force GUI elements to update if we wanted to be really sure
+        """
+        for disp_name, disp_val in prop_cache["disp"].items():
+            self.disp_prop_write(disp_name, disp_val)
 
     def cal_load_clicked(self, checked):
         self.cal_load(load_data_dir=True)
@@ -473,11 +527,15 @@ class ImagerControlScroll(QScrollArea):
     def auto_exposure_enabled(self):
         raise Exception("Required")
 
+    def auto_color_enabled(self):
+        raise Exception("Required")
+
     def cal_load(self, load_data_dir=True):
         try:
-            j = config.cal_load(source=self.vidpip.source_name,
-                                load_data_dir=load_data_dir)
-        except ValueError as e:
+            # source=self.vidpip.source_name
+            j = self.ac.microscope.usc.imager.cal_load(
+                load_data_dir=load_data_dir)
+        except Exception as e:
             self.log("WARNING: Failed to load cal: %s" % (e, ))
             return
         if not j:
@@ -485,9 +543,10 @@ class ImagerControlScroll(QScrollArea):
         self.set_disp_properties(j)
 
     def cal_save(self):
-        config.cal_save_to_data(source=self.vidpip.source_name,
-                                properties=self.get_disp_properties(),
-                                mkdir=True)
+        self.ac.microscope.usc.imager.cal_save_to_data(
+            source=self.vidpip.source_name,
+            disp_properties=self.get_disp_properties(),
+            mkdir=True)
 
     def run(self):
         self.post_imager_ready()
@@ -536,7 +595,7 @@ class ImagerControlScroll(QScrollArea):
                 continue
             element.set_gui_driven(val)
 
-    def validate_raw_name(self, prop_config):
+    def validate_prop_config(self, prop_config):
         """
         Return True if should keep
         Return False if should drop (optional / not on this system)
@@ -544,13 +603,16 @@ class ImagerControlScroll(QScrollArea):
         """
         return True
 
+    def is_disp_prop_optional(self, disp_prop):
+        return disp_prop in self.optional_disp_props
+
 
 """
 Had these in the class but really fragile pre-init
 """
 
 
-def template_property(vidpip, usc, prop_entry):
+def template_property(vidpip, ac, prop_entry):
     if type(prop_entry) == str:
         prop_name = prop_entry
         defaults = {}
@@ -568,7 +630,7 @@ def template_property(vidpip, usc, prop_entry):
     if ps.value_type.name == "gint":
 
         def override(which, default):
-            if not usc:
+            if not ac:
                 return default
             """
             Ex:
@@ -582,7 +644,7 @@ def template_property(vidpip, usc, prop_entry):
                 },
             },
             """
-            spm = usc.imager.source_properties_mod()
+            spm = ac.microscope.usc.imager.source_properties_mod()
             if not spm:
                 return default
             pconfig = spm.get(prop_name)
@@ -604,7 +666,7 @@ def template_property(vidpip, usc, prop_entry):
     return ret
 
 
-def flatten_groups(vidpip, groups_gst, usc, flatten_hack):
+def flatten_groups(vidpip, groups_gst, ac, flatten_hack):
     """
     Convert a high level gst property description to something usable by widget API
     """
@@ -614,7 +676,7 @@ def flatten_groups(vidpip, groups_gst, usc, flatten_hack):
         for prop_entry in gst_properties:
             val = template_property(vidpip=vidpip,
                                     prop_entry=prop_entry,
-                                    usc=usc)
+                                    ac=ac)
             flatten_hack(val)
             propdict[val["prop_name"]] = val
         groups[group_name] = propdict
@@ -624,13 +686,10 @@ def flatten_groups(vidpip, groups_gst, usc, flatten_hack):
 
 
 class MockControlScroll(ImagerControlScroll):
-    def __init__(self, vidpip, usc, parent=None):
+    def __init__(self, vidpip, ac, parent=None):
         self.vidpip = vidpip
         groups = {}
-        ImagerControlScroll.__init__(self,
-                                     groups=groups,
-                                     usc=usc,
-                                     parent=parent)
+        ImagerControlScroll.__init__(self, groups=groups, ac=ac, parent=parent)
 
     def _raw_prop_write(self, name, value):
         pass
@@ -642,20 +701,20 @@ class MockControlScroll(ImagerControlScroll):
     def auto_exposure_enabled(self):
         return False
 
+    def auto_color_enabled(self):
+        return False
+
 
 class GstControlScroll(ImagerControlScroll):
     """
     Display a number of gst-toupcamsrc based controls and supply knobs to tweak them
     """
-    def __init__(self, vidpip, groups_gst, usc, parent=None):
+    def __init__(self, vidpip, groups_gst, ac, parent=None):
         groups = flatten_groups(vidpip=vidpip,
                                 groups_gst=groups_gst,
-                                usc=usc,
+                                ac=ac,
                                 flatten_hack=self.flatten_hack)
-        ImagerControlScroll.__init__(self,
-                                     groups=groups,
-                                     usc=usc,
-                                     parent=parent)
+        ImagerControlScroll.__init__(self, groups=groups, ac=ac, parent=parent)
         self.vidpip = vidpip
         # FIXME: hack
         self.log = self.vidpip.log

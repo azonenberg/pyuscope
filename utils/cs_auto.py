@@ -14,22 +14,24 @@ from uscope import config
 from uscope import cloud_stitch
 import os
 import time
+import json
 
 
 def run(directories, batch_sleep=2400, microscope_name=None, *args, **kwargs):
-    if microscope_name:
-        # Used to bind /override calibration in scan
-        config.default_microscope_name(microscope_name)
     if directories:
         for directory in directories:
-            process_dir(directory, *args, **kwargs)
+            process_dir(directory,
+                        microscope_name=microscope_name,
+                        *args,
+                        **kwargs)
     else:
         # Something 3 like execution units right now
         burst_size = 2
         uploads = 0
         print("Scanning data dir for new scans")
         # Only take the top directory listing
-        for root, directories, _files in os.walk(config.get_scan_dir()):
+        for root, directories, _files in os.walk(
+                config.get_bc().get_scan_dir()):
             break
         for basename in directories:
             directory = os.path.join(root, basename)
@@ -46,7 +48,10 @@ def run(directories, batch_sleep=2400, microscope_name=None, *args, **kwargs):
                 print(
                     "WARNING: throttling upload to let stitch server catch up")
                 time.sleep(batch_sleep)
-            process_dir(directory, *args, **kwargs)
+            process_dir(directory,
+                        *args,
+                        microscope_name=microscope_name,
+                        **kwargs)
             uploads += 1
 
 
@@ -84,6 +89,7 @@ def main():
                         help="Hack for not overloading stitch service")
     parser.add_argument("--ewf")
     parser.add_argument("--microscope")
+    parser.add_argument("--json")
     parser.add_argument("dirs_in", nargs="*")
     args = parser.parse_args()
 
@@ -91,6 +97,10 @@ def main():
                      secret_key=args.secret_key,
                      id_key=args.id_key,
                      notification_email=args.notification_email)
+
+    j = {}
+    if args.json:
+        j = json.loads(args.json)
 
     run(args.dirs_in,
         cs_info=cs_info,
@@ -102,6 +112,7 @@ def main():
         batch_sleep=args.batch_sleep,
         nthreads=args.threads,
         microscope_name=args.microscope,
+        configj=j,
         verbose=args.verbose)
 
 

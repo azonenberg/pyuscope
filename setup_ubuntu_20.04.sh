@@ -3,20 +3,6 @@
 
 set -ex
 
-if [ -z "$PYUSCOPE_MICROSCOPE" ] ; then
-    echo "Must specify PYUSCOPE_MICROSCOPE to install. Ex: PYUSCOPE_MICROSCOPE=mock ./setup_ubuntu_20.04.sh"
-    echo "Ex: PYUSCOPE_MICROSCOPE=ls-hvy-2 ./setup_ubuntu_20.04.sh"
-    echo "Ex: PYUSCOPE_MICROSCOPE=none ./setup_ubuntu_20.04.sh"
-    find configs -maxdepth 1 -mindepth 1 -type d |sort
-    exit 1
-fi
-if [ "$PYUSCOPE_MICROSCOPE" = "none" ] ; then
-    true
-elif [ '!' -d "configs/$PYUSCOPE_MICROSCOPE" ] ; then
-    echo "Invalid PYUSCOPE_MICROSCOPE given"
-    exit 1
-fi
-
 if [ \! -d configs ] ; then
     echo "Must be run from the root dir"
     exit 1
@@ -26,8 +12,19 @@ sudo apt-get update
 sudo apt-get install -y python3-pip
 
 install_pyuscope() {
-    sudo apt-get install -y python3-gst-1.0 python3-gi python3-pyqt5 python3-usb python3-opencv python3-serial python3-numpy python3-scipy imagemagick
-    sudo pip3 install json5 boto3 pygame psutil
+    sudo apt-get install -y python3-gst-1.0 python3-gi python3-pyqt5 python3-usb python3-opencv python3-serial python3-numpy python3-scipy imagemagick enfuse python3-distro
+    # 2024-01-03: dev seems to be required, not just base
+    # Some people suggest gir1.2-gst-rtsp-server-1.0
+    # Install all for now
+    sudo apt-get install -y libgstrtspserver-1.0-0 libgstrtspserver-1.0-dev gir1.2-gst-rtsp-server-1.0
+    sudo pip3 install json5 boto3 pygame psutil bitarray
+
+
+    # Ubuntu 20.04
+    sudo apt-get install -y hugin-tools
+    # Ubuntu 22.04
+    # sudo apt update && sudo apt install flatpak
+    # flatpak install https://dl.flathub.org/repo/appstream/net.sourceforge.Hugin.flatpakref
 
     # For webserver
     sudo apt-get install -y python3-werkzeug
@@ -63,18 +60,18 @@ install_gst_plugin_toupcam() {
     popd
 }
 
+apply_migrations() {
+    # User might not have microscope attached
+    ./test/grbl/migrate_meta.py || true
+}
+
 install_gst_plugin_toupcam
 install_pyuscope
 # Deprecated, use pyrav4l2
 # install_antmicro_v4l2
 install_pyrav4l2
 
-if [ "$PYUSCOPE_MICROSCOPE" != "none" ] ; then
-    # Found some systems don't read .profile....shrug
-    echo "Adding default microscope to .profile and .bashrc"
-    echo "export PYUSCOPE_MICROSCOPE=$PYUSCOPE_MICROSCOPE" >> ~/.profile
-    echo "export PYUSCOPE_MICROSCOPE=$PYUSCOPE_MICROSCOPE" >> ~/.bashrc
-fi
+apply_migrations
 
 # usermod is finicky requires login / logout
 # GST_PLUGIN_PATH can be similar

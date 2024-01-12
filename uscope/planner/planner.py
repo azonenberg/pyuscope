@@ -170,8 +170,11 @@ class Planner:
                     break
             self.log('Planner unpaused')
 
-    def stop(self):
+    def shutdown_request(self):
         self.running = False
+
+    def shutdown_join(self):
+        pass
 
     def write_meta(self):
         # Copy config for reference
@@ -344,8 +347,13 @@ class Planner:
             plugin.gen_meta(ret)
 
         self.full_end_time = time.time()
-        ret['full_time'] = self.full_end_time - self.full_start_time
+        ret["full_time"] = self.full_end_time - self.full_start_time
         ret["pipeline"] = list(self.pipeline.keys())
+        ret["microscope"] = {
+            "name": self.microscope.name,
+            "serial": self.microscope.serial(),
+            "dataname": self.microscope.usc.get_microscope_dataname(),
+        }
 
         return ret
 

@@ -37,13 +37,20 @@ class V4L2GstControlScroll(GstControlScroll):
     """
     Display a number of gst-toupcamsrc based controls and supply knobs to tweak them
     """
-    def __init__(self, vidpip, usc=None, parent=None):
+    def __init__(self, vidpip, ac=None, parent=None):
         GstControlScroll.__init__(self,
                                   vidpip=vidpip,
                                   groups_gst=groups_gst,
-                                  usc=usc,
+                                  ac=ac,
                                   parent=parent)
 
+
+class V4L2GstControlScrollTest(V4L2GstControlScroll):
     def auto_exposure_enabled(self):
-        # FIXME: is this accurate? There might be a prop
-        return True
+        # Might not be true, but turns off warning
+        # TODO: check if property is found
+        # Assume off otherwise to avoid generating a warning for something we can't check
+        return False
+
+    def auto_color_enabled(self):
+        return False

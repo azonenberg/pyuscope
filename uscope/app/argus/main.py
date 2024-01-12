@@ -2,10 +2,12 @@
 
 from uscope.gui.gstwidget import gstwidget_main
 from uscope.util import add_bool_arg
+from uscope.gui.widgets import AMainWindow
 from uscope import config
 import json
 import json5
 from collections import OrderedDict
+from uscope.gui.input_widget import InputWidget
 
 from PyQt5 import Qt
 from PyQt5.QtGui import *
@@ -17,10 +19,139 @@ import sys
 import traceback
 import threading
 
-from uscope.app.argus.common import ArgusCommon, ArgusShutdown, error
+from uscope.gui.common import ArgusCommon, ArgusShutdown, error
 
-from uscope.app.argus.widgets import MainTab, ImagerTab, BatchImageTab, AdvancedTab, StitchingTab, MeasureTab
-from uscope.app.argus.scripting import ScriptingTab
+from uscope.gui.widgets import TopWidget, BatchImageTab, AdvancedTab, StitchingTab, MeasureTab
+from uscope.gui.imaging import MainTab, ImagerTab
+from uscope.gui.scripting import ScriptingTab
+
+
+# Can't save a dict like {(1, 2): "a"}
+def tupledict_to_json(j):
+    # {(1, 2): "a"} => [((1, 2), "a")]
+    return [(k, v) for k, v in j.items()]
+
+
+def json_to_tupledict(j):
+    # [((1, 2), "a")] => {(1, 2): "a"}
+    return dict([(tuple(k), v) for k, v in j])
+
+
+class ArgusOptionsWindow(QWidget):
+    def __init__(self, mw, parent=None):
+        super().__init__(parent=parent)
+        self.mw = mw
+        self.ac = self.mw.ac
+        # self.motion_damper = None
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout()
+
+        def motion_gb():
+            layout = QGridLayout()
+            row = 0
+
+            layout.addWidget(
+                QLabel("Motion damper (default 1.0 => full speed)"), row, 0)
+            self.motion_damper_le = QLineEdit("")
+            self.motion_damper_le.returnPressed.connect(
+                self.motion_damper_le_return)
+            layout.addWidget(self.motion_damper_le, row, 1)
+            row += 1
+
+            gb = QGroupBox("Motion")
+            gb.setLayout(layout)
+
+            return gb
+
+        def joystick_gb():
+            layout = QVBoxLayout()
+
+            self.joystick_iw = None
+            if self.ac.microscope.joystick is None:
+                layout.addWidget(QLabel("None"))
+            else:
+                self.joystick_iw = InputWidget(
+                    return_pressed=self.joystick_return)
+                iconfig = {}
+                joystick_config = self.ac.microscope.joystick.config.get_user_config(
+                )
+                for function_name, function_val in joystick_config.items():
+                    for k, v in function_val.items():
+                        label = "%s.%s (default %s)" % (function_name, k,
+                                                        v.get("default"))
+                        iconfig[label] = {
+                            "key": (function_name, k),
+                            # better to be none by default
+                            # "default": v.get("default"),
+                            "type": float,
+                            "empty_as_none": True,
+                            "widget": "QLineEdit",
+                        }
+                self.joystick_iw.configure(iconfig)
+                layout.addWidget(self.joystick_iw)
+
+            gb = QGroupBox("Joystick")
+            gb.setLayout(layout)
+
+            return gb
+
+        layout.addWidget(motion_gb())
+        layout.addWidget(joystick_gb())
+        self.setLayout(layout)
+
+    def motion_damper_le_return(self, lazy=False):
+        s = str(self.motion_damper_le.text()).strip()
+        if s:
+            try:
+                motion_damper = float(s)
+            except ValueError:
+                self.ac.log("Failed to parse motion damper scalar")
+                return
+            if motion_damper <= 0 or motion_damper > 1.0:
+                self.ac.log(
+                    f"Require motion damper 0 < {motion_damper} <= 1.0")
+                return
+        else:
+            if lazy:
+                return
+            motion_damper = 1.0
+        self.ac.log(f"Setting motion damper {motion_damper}")
+        self.ac.microscope.motion_ts().apply_damper(motion_damper)
+        # self.motion_damper = motion_damper
+
+    def joystick_return(self):
+        try:
+            value = self.joystick_iw.getValues()
+        except Exception as e:
+            self.ac.log(f"Failed to parse input value: {type(e)}, {e}")
+            return
+        # print("joystick value", value)
+        config = {}
+        for (function_name, k), v in value.items():
+            config.setdefault(function_name, {})[k] = v
+        # print("joystick config", config)
+        self.ac.microscope.joystick.config.set_user_config(config)
+
+    def cache_load(self, j):
+        j = j.get("main_window", {}).get("options", {})
+        self.motion_damper_le.setText(j.get("motion_damper", ""))
+        self.motion_damper_le_return(lazy=True)
+        if self.joystick_iw:
+            try:
+                saved_val = j.get("joystick_iw")
+                if saved_val:
+                    self.joystick_iw.setValues(json_to_tupledict(saved_val))
+            except Exception as e:
+                print("WARNING: failed to load joystick calibration", e)
+
+    def cache_save(self, j):
+        j = j.setdefault("main_window", {}).setdefault("options", {})
+        j["motion_damper"] = str(self.motion_damper_le.text())
+        if self.joystick_iw:
+            values = self.joystick_iw.getValues()
+            j["joystick_iw"] = tupledict_to_json(values)
 
 
 class FullscreenVideo(QWidget):
@@ -41,32 +172,32 @@ class FullscreenVideo(QWidget):
         self.closing.emit()
 
 
-class MainWindow(QMainWindow):
+class MainWindow(AMainWindow):
     def __init__(self, microscope=None, verbose=False):
-        QMainWindow.__init__(self)
+        AMainWindow.__init__(self)
         # Homing may need attention in CLI
         # Make sure user sees that before UI
         self.hide()
         self.verbose = verbose
-        self.shutting_down = False
-        self.ac = None
-        self.awidgets = OrderedDict()
-        self.polli = 0
         self.ac = ArgusCommon(microscope_name=microscope, mw=self)
         self.init_objects()
         self.ac.logs.append(self.mainTab.log)
         self.initUI()
-        # something caues this to pop back up
+        # something causes this to pop back up
         # keep it hidden until we are homed since homing is still on CLI...
         self.hide()
         self.post_ui_init()
-        self.cachej = None
+
+        # Load last GUI state
+        # Must be done after post_ui_init() as may depend on threads being fully initialized
+        self.cache_load()
+
         self.show()
 
-    def __del__(self):
-        self.shutdown()
+        # sometimes GUI maximization doesn't stick
+        self.showMaximized()
 
-    def our_cache_load(self, j):
+    def _cache_load(self, j):
         j = j.get("main_window", {})
         self.displayLimits.setChecked(
             j.get("display_limits", config.bc.dev_mode()))
@@ -77,81 +208,40 @@ class MainWindow(QMainWindow):
         self.displayAdvancedObjective.setChecked(
             j.get("display_advanced_objective", config.bc.dev_mode()))
         self.displayAdvancedObjectiveTriggered()
+        self.argus_options_window.cache_load(j)
 
-    def cache_load(self):
-        fn = self.ac.aconfig.cache_fn()
-        self.cachej = {}
-        if os.path.exists(fn):
-            with open(fn, "r") as f:
-                self.cachej = json5.load(f)
-        self.our_cache_load(self.cachej)
-        for tab in self.awidgets.values():
-            tab.cache_load(self.cachej)
-
-    def our_cache_save(self, j):
+    def _cache_save(self, j):
         j = j.setdefault("main_window", {})
         j["display_limits"] = self.displayLimits.isChecked()
         j["display_advanced_movement"] = self.displayAdvancedMovement.isChecked(
         )
         j["display_advanced_objective"] = self.displayAdvancedObjective.isChecked(
         )
+        self.argus_options_window.cache_save(j)
 
-    def cache_save(self):
-        if not self.ac:
-            return
-        cachej = {}
-        self.our_cache_save(cachej)
-        for tab in self.awidgets.values():
-            tab.cache_save(cachej)
-        fn = self.ac.aconfig.cache_fn()
-        with open(fn, "w") as f:
-            json.dump(cachej,
-                      f,
-                      sort_keys=True,
-                      indent=4,
-                      separators=(",", ": "))
-
-    def closeEvent(self, event):
-        self.shutdown()
-
-    def shutdown(self):
-        # Concern multiple closing events may fight
-        if self.shutting_down:
-            return
-        self.shutting_down = True
-
-        if self.fullscreen_widget:
-            self.fullscreen_widget.close()
-
-        self.cache_save()
-        for tab in self.awidgets.values():
-            tab.shutdown()
-        try:
-            if self.ac:
-                self.ac.shutdown()
-        except AttributeError:
-            pass
+    def add_tab(self, cls, name):
+        tab = cls(ac=self.ac, aname=name, parent=self)
+        self.ac.tabs[name] = tab
+        return tab
 
     def init_objects(self):
         # Tabs
-        self.mainTab = MainTab(ac=self.ac, parent=self)
-        self.awidgets["Main"] = self.mainTab
-        self.imagerTab = ImagerTab(ac=self.ac, parent=self)
-        self.awidgets["Imager"] = self.imagerTab
-        self.measureTab = MeasureTab(ac=self.ac, parent=self)
-        self.awidgets["Measure"] = self.measureTab
-        self.batchTab = BatchImageTab(ac=self.ac, parent=self)
-        self.awidgets["Batch"] = self.batchTab
-        self.scriptingTab = ScriptingTab(ac=self.ac, parent=self)
-        self.awidgets["Scripting"] = self.scriptingTab
-        self.advancedTab = AdvancedTab(ac=self.ac, parent=self)
-        self.awidgets["Advanced"] = self.advancedTab
-        self.stitchingTab = StitchingTab(ac=self.ac, parent=self)
-        self.awidgets["CloudStitch"] = self.stitchingTab
+        self.mainTab = self.add_tab(MainTab, "Main")
+        self.imagerTab = self.add_tab(ImagerTab, "Imager")
+        self.measureTab = self.add_tab(MeasureTab, "Measure")
+        self.batchTab = self.add_tab(BatchImageTab, "Batch")
+        self.scriptingTab = self.add_tab(ScriptingTab, "Scripting")
+        self.advancedTab = self.add_tab(AdvancedTab, "Advanced")
+        self.stitchingTab = self.add_tab(StitchingTab, "CloudStitch")
+
+        # FIXME: hack, come up with something more intuitive
         self.ac.mainTab = self.mainTab
         self.ac.scriptingTab = self.scriptingTab
         self.ac.stitchingTab = self.stitchingTab
         self.ac.batchTab = self.batchTab
+        self.ac.advancedTab = self.advancedTab
+
+        self.argus_options_window = ArgusOptionsWindow(self)
 
     def createMenuBar(self):
         self.exitAction = QAction("Exit", self)
@@ -163,6 +253,16 @@ class MainWindow(QMainWindow):
         # File menu
         fileMenu = QMenu("File", self)
         menuBar.addMenu(fileMenu)
+        # Option
+        self.clearLog = QAction("Clear log", fileMenu)
+        fileMenu.addAction(self.clearLog)
+        self.clearLog.triggered.connect(self.clearLogTriggered)
+        # Extended options
+        self.displayArgusOptions = QAction("Advanced options", fileMenu)
+        fileMenu.addAction(self.displayArgusOptions)
+        self.displayArgusOptions.triggered.connect(
+            self.displayArgusOptionsTriggered)
+        # Exit
         fileMenu.addAction(self.exitAction)
 
         # Video menu
@@ -186,6 +286,11 @@ class MainWindow(QMainWindow):
         videoMenu.addAction(self.displayAdvancedObjective)
         self.displayAdvancedObjective.triggered.connect(
             self.displayAdvancedObjectiveTriggered)
+        self.enableRtspServer = QAction("RTSP Server", self, checkable=True)
+        if config.bc.dev_mode():
+            videoMenu.addAction(self.enableRtspServer)
+            self.enableRtspServer.triggered.connect(
+                self.enableRtspServerTriggered)
 
         motionMenu = menuBar.addMenu("Motion")
         # Some people prefer perspective of moving camera, some prefer moving stage
@@ -260,8 +365,7 @@ class MainWindow(QMainWindow):
     def about(self):
         pass
 
-    def initUI(self):
-        self.ac.initUI()
+    def _initUI(self):
         self.setWindowTitle("pyuscope main")
         self.setWindowIcon(QIcon(config.GUI.icon_files["logo"]))
         self.fullscreen_widget = None
@@ -276,16 +380,14 @@ class MainWindow(QMainWindow):
         def left():
             layout = QVBoxLayout()
 
-            self.tab_widget = QTabWidget()
-            for tab_name, tab in self.awidgets.items():
-                tab.initUI()
-                self.tab_widget.addTab(tab, tab_name)
-            self.batchTab.add_pconfig_source(self.mainTab, "Main tab")
-            layout.addWidget(self.tab_widget)
+            self.top_widget = TopWidget(ac=self.ac, aname="top", parent=self)
+            self.ac.top_widget = self.top_widget
+            layout.addWidget(self.top_widget)
 
-            self.stop_pb = QPushButton("STOP")
-            self.stop_pb.clicked.connect(self.stop_pushed)
-            layout.addWidget(self.stop_pb)
+            self.tab_widget = QTabWidget()
+            for tab_name, tab in self.ac.tabs.items():
+                self.tab_widget.addTab(tab, tab_name)
+            layout.addWidget(self.tab_widget)
 
             return layout
 
@@ -298,48 +400,10 @@ class MainWindow(QMainWindow):
         self.createMenuBar()
         self.showMaximized()
 
-        # Load last GUI state
-        self.cache_load()
-
-    def poll_misc(self):
-        self.polli += 1
-        ac = self.ac
-
-        motion_thread = ac.motion_thread
-        # deleted during shutdown => can lead to crash during shutdown
-        if motion_thread:
-            motion_thread.update_pos_cache()
-
-        # FIXME: maybe better to do this with events
-        # Loose the log window on shutdown...should log to file?
-        try:
-            ac.poll_misc()
-        except ArgusShutdown:
-            print(traceback.format_exc())
-            ac.shutdown()
-            QCoreApplication.exit(1)
-            return
-
-        # FIXME: convert to plugin iteration
-        self.mainTab.planner_widget_xy2p.poll_misc()
-        self.mainTab.planner_widget_xy3p.poll_misc()
-        self.mainTab.motion_widget.poll_misc()
-        self.imagerTab.poll_misc()
-        self.scriptingTab.poll_misc()
-
-        # Save ocassionally / once 3 seconds
-        if self.polli % 15 == 0:
-            self.cache_save()
+    def _poll_misc(self):
+        pass
 
     def post_ui_init(self):
-        self.ac.log("pyuscope starting")
-        self.ac.log("https://github.com/Labsmore/pyuscope/")
-        self.ac.log("For enquiries contact support@labsmore.com")
-        self.ac.log("")
-
-        self.ac.update_pconfigs.append(self.mainTab.update_pconfig)
-        self.ac.update_pconfigs.append(self.advancedTab.update_pconfig)
-        self.ac.update_pconfigs.append(self.imagerTab.update_pconfig)
         # Start services
         # This will microscope.configure() which is needed by later tabs
         self.ac.post_ui_init()
@@ -357,22 +421,26 @@ class MainWindow(QMainWindow):
         #    self.addTab(JoystickTab(ac=self.ac, parent=self))
 
     def keyPressEvent(self, event):
-
         k = event.key()
         if k == Qt.Key_Escape:
             self.ac.motion_thread.stop()
-
-        # Ignore duplicates, want only real presses
-        if 0 and event.isAutoRepeat():
-            return
-
         # KiCAD zoom in / out => F1 / F2
-        if k == Qt.Key_F1:
+        elif k == Qt.Key_F1:
             self.ac.vidpip.zoomable_plus()
         elif k == Qt.Key_F2:
             self.ac.vidpip.zoomable_minus()
         elif k == Qt.Key_F3:
             self.ac.vidpip.zoomable_high_toggle()
+        elif event.key() == Qt.Key_F11:
+            if self.isMaximized():
+                self.showNormal()
+            else:
+                self.showMaximized()
+                self.showFullScreen()
+        else:
+            event.ignore()
+            return
+        event.accept()
 
     def invertKJXYTriggered(self):
         mw = self.mainTab.motion_widget
@@ -384,13 +452,19 @@ class MainWindow(QMainWindow):
     def displayLimitsTriggered(self):
         self.ac.mainTab.show_minmax(bool(self.displayLimits.isChecked()))
 
+    def clearLogTriggered(self):
+        self.ac.mainTab.clear_log()
+
     def displayAdvancedMovementTriggered(self):
         self.ac.mainTab.motion_widget.show_advanced_movement(
             bool(self.displayAdvancedMovement.isChecked()))
 
-    def stop_pushed(self):
-        self.ac.log("System stop requested")
-        self.ac.microscope.stop()
+    def displayArgusOptionsTriggered(self):
+        self.argus_options_window.show()
+
+    def enableRtspServerTriggered(self):
+        self.ac.vidpip.enable_rtsp_server(
+            bool(self.enableRtspServer.isChecked()))
 
 
 def parse_args():

@@ -2,6 +2,8 @@ from uscope.microscope import MicroscopeStop
 import threading
 import queue
 import traceback
+import random
+import time
 
 
 class CommandThreadBase:
@@ -18,8 +20,18 @@ class CommandThreadBase:
     def log(self, msg=""):
         print(msg)
 
-    def shutdown(self):
+    def shutdown_request(self):
         self.running.clear()
+
+    '''
+    def shutdown_join(self, timeout=3.0):
+        # self.join(timeout=timeout)
+        assert 0, "required"
+    '''
+
+    def shutdown(self, timeout=3.0):
+        self.shutdown_request()
+        self.shutdown_join(timeout=timeout)
 
     def command(self, command, *args, block=False, callback=None, done=None):
         """
@@ -48,12 +60,24 @@ class CommandThreadBase:
                 raise Exception("oopsie: %s" % (ret, ))
             return ret
 
+    def check_stress(self):
+        if self.microscope.bc.stress_test():
+            time.sleep(random.randint(0, 100) * 0.001)
+
+    def loop_poll(self):
+        """
+        Called every loop before checking queue
+        """
+        pass
+
     def run(self):
         self.verbose and print("Task thread started: %s" %
                                (threading.get_ident(), ))
         self.running.set()
 
         while self.running.is_set():
+            self.check_stress()
+            self.loop_poll()
             try:
                 (command, args, command_done) = self.queue.get(True, 0.1)
             except queue.Empty:
@@ -72,6 +96,7 @@ class CommandThreadBase:
             except MicroscopeStop as e:
                 if command_done:
                     command_done(command, args, e)
+                continue
             # :( abort
             except Exception as e:
                 self.log(f"WARNING: {self.__class__} thread crashed: {e}")

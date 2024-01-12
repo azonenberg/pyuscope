@@ -62,6 +62,18 @@ class MotionThreadMotion(MotionHAL):
     def _get_max_accelerations(self):
         return self.mt.motion.get_max_accelerations()
 
+    def jog_rel(self, pos, rate):
+        return self.mt.jog_rel(pos, rate)
+
+    def jog_cancel(self):
+        return self.mt.jog_cancel()
+
+    def apply_damper(self, damper):
+        return self.mt.apply_damper(damper)
+
+    def command(self, command):
+        return self.mt.mdi(command)
+
 
 """
 Several sources need to periodically send jog commands based on stimulus
@@ -77,6 +89,7 @@ class JogController:
         self.jogging = False
         self.dts = []
         self.tlast = None
+        self.slow_jogs = 0
 
     def update(self, axes):
         # XXX: adjust jogging based on actual loop time instead of estimated?
@@ -97,6 +110,7 @@ class JogController:
                     f"JOG WARNING: actual loop time {this_dt} is less than estimated period {self.period}. GRBL jog queue may overflow"
                 )
             if this_dt > 1.5 * self.period:
+                self.slow_jogs += 1
                 1 and print(
                     f"JOG WARNING: actual loop time {this_dt} is significantly larger than estimated period {self.period}. Jogging may stutter"
                 )
@@ -178,8 +192,8 @@ class MotionThreadBase(CommandThreadBase):
                                      log=self.log,
                                      microscope=self.microscope)
 
-    def log_info(self):
-        self.command("log_info")
+    def log_info(self, block=False):
+        self.command("log_info", block=block)
 
     def setRunning(self, running):
         if running:
@@ -234,8 +248,11 @@ class MotionThreadBase(CommandThreadBase):
         else:
             print("WARNING: drop jog on backing up queue")
 
+    def jog_rel(self, pos, rate):
+        self.command("jog_rel", pos, rate)
+
     def jog_abs(self, pos, rate):
-        self.command("jog", pos, rate)
+        self.command("jog_abs", pos, rate)
 
     def jog_abs_lazy(self, pos, rate):
         """
@@ -280,6 +297,9 @@ class MotionThreadBase(CommandThreadBase):
     def update_pos_cache(self):
         self.command("update_pos_cache")
 
+    def apply_damper(self, damper, block=False, callback=None):
+        self.command("apply_damper", damper, block=block, callback=callback)
+
     def qsize(self):
         return self.queue.qsize()
 
@@ -295,6 +315,12 @@ class MotionThreadBase(CommandThreadBase):
 
     def shutdown(self):
         self.running.clear()
+
+    def _jog_rel(self, *args, **kwargs):
+        if self._jog_enabled:
+            self.motion.jog_rel(*args, **kwargs)
+        else:
+            self.log("WARNING: jog disabled, dropping jog")
 
     def _jog_abs(self, *args, **kwargs):
         if self._jog_enabled:
@@ -317,6 +343,8 @@ class MotionThreadBase(CommandThreadBase):
     def run(self):
         self.verbose and print("Motion thread started: %s" %
                                (threading.get_ident(), ))
+        self.motion.updte_motion_thread()
+        self.motion.check_thread_safety()
         self.running.set()
         self.idle.clear()
         self.motion.on()
@@ -406,6 +434,7 @@ class MotionThreadBase(CommandThreadBase):
                     'update_pos_cache': update_pos_cache,
                     'move_absolute': move_absolute,
                     'move_relative': move_relative,
+                    'jog_rel': self._jog_rel,
                     'jog_abs': self._jog_abs,
                     'jog_fractioned': self._jog_fractioned,
                     'jog_cancel': self._jog_cancel,
@@ -418,6 +447,7 @@ class MotionThreadBase(CommandThreadBase):
                     'unestop': self.motion.unestop,
                     'mdi': self.motion.command,
                     'log_info': self.motion.log_info,
+                    'apply_damper': self.motion.apply_damper,
                 }.get(command, default)
                 tstart = time.time()
                 try:

@@ -7,6 +7,7 @@ import json5
 import json
 import glob
 import errno
+import time
 
 
 def print_debug(s=None):
@@ -206,9 +207,71 @@ class IOLog(object):
         self.out_fd.write(data)
 
 
+"""
+Take a log / print function and copy it to a file
+
+with LogToFile("log.txt", log=self.log) as log:
+    log("Logged to both!")
+"""
+
+
+class LogToFile:
+    def __init__(self,
+                 out_fn,
+                 log=None,
+                 mode='a',
+                 shift=False,
+                 multi=False,
+                 nl=None,
+                 out_fd=None):
+        if not multi:
+            if out_fd:
+                self.out_fd = out_fd
+            else:
+                self.out_fd = open(out_fn, 'w')
+        else:
+            # instead of jamming logs together, shift last to log.txt.1, etc
+            if shift and os.path.exists(out_fn):
+                i = 0
+                while True:
+                    dst = out_fn + '.' + str(i)
+                    if os.path.exists(dst):
+                        i += 1
+                        continue
+                    shutil.move(out_fn, dst)
+                    break
+
+            header = mode == 'a' and os.path.exists(out_fn)
+            self.out_fd = open(out_fn, mode)
+            if header:
+                self.out_fd.write('*' * 80 + '\n')
+                self.out_fd.write('*' * 80 + '\n')
+                self.out_fd.write('*' * 80 + '\n')
+                self.out_fd.write('Log rolled over\n')
+
+        self.log_chain = log
+        if nl is None:
+            nl = "\n"
+        self.nl = nl
+
+    def log(self, s):
+        self.out_fd.write(s)
+        if self.nl:
+            self.out_fd.write(self.nl)
+        self.log_chain(s)
+
+    def __enter__(self):
+        return self.log
+
+    def __exit__(self, *args):
+        if self.out_fd:
+            self.out_fd.close()
+
+
 def writej(fn, j):
-    open(fn, 'w').write(
-        json.dumps(j, sort_keys=True, indent=4, separators=(",", ": ")))
+    with open(fn, 'w') as f:
+        f.write(json.dumps(j, sort_keys=True, indent=4,
+                           separators=(",", ": ")))
 
 
 def printj(j):
@@ -216,7 +279,13 @@ def printj(j):
 
 
 def readj(fn):
-    return json5.load(open(fn, "r"))
+    with open(fn, "r") as f:
+        return json5.load(f)
+
+
+def datetime_file_str():
+    return datetime.datetime.utcnow().isoformat().replace('T', '_').replace(
+        ':', '-').split('.')[0]
 
 
 def default_date_dir(root, prefix, postfix):
@@ -304,3 +373,42 @@ def time_str(delta):
     delta /= 60
     hours = delta
     return '%02d:%02d:%02d.%04d' % (hours, minutes, seconds, fraction * 10000)
+
+
+def time_str_1dec(delta):
+    fraction = delta % 1
+    delta -= fraction
+    delta = int(delta)
+    seconds = delta % 60
+    delta /= 60
+    minutes = delta % 60
+    delta /= 60
+    hours = delta
+    return '%02d:%02d:%02d.%01d' % (hours, minutes, seconds, fraction * 10)
+
+
+"""
+with LogTimer("save get", self.log):
+    do_stufF()
+"""
+
+
+class LogTimer:
+    def __init__(self, name, log=None, variable=None):
+        if log is None:
+            log = print
+        self.log = log
+        self.name = name
+        self.variable = variable
+
+    def __enter__(self):
+        self.start = time.time()
+        return self
+
+    def __exit__(self, *args):
+        self.end = time.time()
+        if self.variable:
+            if os.getenv(self.variable) != "Y":
+                return
+        self.log("%s benchmark: %s took %0.3f sec" %
+                 (datetime_file_str(), self.name, self.end - self.start))

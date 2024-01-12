@@ -1,10 +1,11 @@
-import json
 import json5
 import os
 from collections import OrderedDict
 from uscope.util import writej, readj
 from pathlib import Path
-import copy
+from uscope import jsond
+import shutil
+import subprocess
 '''
 There is a config directory with two primary config files:
 -microscope.j5: inherent config that doesn't really change
@@ -38,103 +39,51 @@ defaults = {
     }
 }
 """
-defaults = {}
 
 # microscope.j5
 usj = None
 usc = None
-config_dir = None
-default_microscope_name_cache = None
 """
 Calibration broken out into separate file to allow for easier/safer frequent updates
 Ideally we'd also match on S/N or something like that
 """
 
 
+def find_panotools_exe(config, configk, exe_name, flatpak_name):
+    exe = config.get(configk)
+    if exe is not None:
+        return tuple(exe)
+
+    if 1:
+        exe = shutil.which(exe_name)
+        if exe is not None:
+            return (exe, )
+
+    # flatpak run --command=enfuse net.sourceforge.Hugin --help
+    # bwrap: execvp align_image_stackD: No such file or directory
+    # bad command => returns 1
+    # good command => returns 0
+    command = [
+        "flatpak", "run", f"--command={flatpak_name}", "net.sourceforge.Hugin",
+        "--help"
+    ]
+    try:
+        process = subprocess.Popen(command,
+                                   stderr=subprocess.PIPE,
+                                   stdout=subprocess.PIPE)
+        _stdout, _stderr = process.communicate()
+        exit_code = process.wait()
+        if exit_code == 0:
+            return ("flatpak", "run",
+                    f"--command={flatpak_name} net.sourceforge.Hugin")
+    # FIME: catch the specific exception for command not found
+    except:
+        pass
+    return None
+
+
 class SystemNotFound(Exception):
     pass
-
-
-def has_default_microscope_name():
-    return bool(default_microscope_name_cache)
-
-
-def default_microscope_name(name=None):
-    global default_microscope_name_cache
-
-    if name:
-        default_microscope_name_cache = name
-        return name
-    if default_microscope_name_cache:
-        return default_microscope_name_cache
-    name = os.getenv("PYUSCOPE_MICROSCOPE")
-    if name:
-        default_microscope_name_cache = name
-        return name
-    raise Exception("Must specify microscope")
-
-
-def cal_fn_microscope(name=None):
-    return os.path.join(get_config_dir(name=name), "imager_calibration.j5")
-
-
-def get_microscope_data_dir(name=None, mkdir=True):
-    name = default_microscope_name(name)
-    microscopes_dir = os.path.join(get_data_dir(mkdir=mkdir), "microscopes")
-    if mkdir and not os.path.exists(microscopes_dir):
-        os.mkdir(microscopes_dir)
-    microscope_dir = os.path.join(microscopes_dir, name)
-    if mkdir and not os.path.exists(microscope_dir):
-        os.mkdir(microscope_dir)
-    return microscope_dir
-
-
-def cal_fn_data(name=None, mkdir=True):
-    microscope_dir = get_microscope_data_dir(name=name, mkdir=mkdir)
-    return os.path.join(microscope_dir, "imager_calibration.j5")
-
-
-def cal_load(source=None, name=None, load_data_dir=True):
-    def load_config(fn):
-        if not fn:
-            return {}
-        if not os.path.exists(fn):
-            return {}
-        configj = readj(fn)
-        configs = configj["configs"]
-        if type(configs) is list:
-            raise ValueError(
-                "Old style calibration, please update from list to dict")
-        config = configs["default"]
-        if source and config["source"] != source:
-            raise ValueError("Source mismatches in config file")
-        assert "properties" in config
-        return config["properties"]
-
-    # configs/ls-hvy-1/imager_calibration.j5
-    microscopej = load_config(cal_fn_microscope(name=name))
-    if not load_data_dir:
-        return microscopej
-    # Take defaults from dataj, the user directory
-    # data/microscopes/ls-hvy-1/imager_calibration.j5
-    dataj = load_config(cal_fn_data(name))
-    for k, v in dataj.items():
-        microscopej[k] = v
-    return microscopej
-
-
-def cal_save_to_data(source, properties, mkdir=False):
-    if mkdir and not os.path.exists(get_data_dir()):
-        os.mkdir(get_data_dir())
-    jout = {
-        "configs": {
-            "default": {
-                "source": source,
-                "properties": properties
-            }
-        }
-    }
-    writej(cal_fn_data(), jout)
 
 
 class USCImager:
@@ -147,20 +96,50 @@ class USCImager:
 
     valid_keys = {"source", "width", "height", "crop"}
 
-    def __init__(self, j=None):
+    def __init__(self, j=None, microscope=None):
         """
         j: usj["imager"]
         """
         self.j = j
+        self.microscope = microscope
         #if not "width" in j or not "height" in j:
         #    raise ValueError("width/height required")
+        self.cache_constants()
+
+    def cache_constants(self):
+        # More of a hard real time constant
+        # Something is wrong if this is exceeded
+        self._snapshot_timeout = self.microscope.bc.timeout_scalar_scale(3.0)
+        # If processing gets expensive or backs up this could get high
+        # Maybe this should be set to a high value
+        # However planner etc relies on this running relatively quickly
+        self._processing_timeout = self.microscope.bc.timeout_scalar_scale(5.0)
+
+    def snapshot_timeout(self):
+        return self._snapshot_timeout
+
+    def processing_timeout(self):
+        return self._processing_timeout
 
     def source(self):
         return self.j.get("source", "auto")
 
+    def native_wh(self):
+        """
+        The largest possible sensor resolution
+        Following are not applied yet: crop, scaling
+        """
+        valw = self.j.get("native_width", self.j.get("width"))
+        valh = self.j.get("native_height", self.j.get("height"))
+        if valw is None or valh is None:
+            raise Exception(
+                "can't compute um_per_pixel_raw_1x: not specified and missing native_width/height"
+            )
+        return int(valw), int(valh)
+
     def raw_wh(self):
         """
-        The actual sensor size
+        The selected sensor size before any processing
         Following are not applied yet: crop, scaling
         """
         w = int(self.j['width'])
@@ -288,11 +267,9 @@ class USCImager:
         """
         return self.j.get("save_quality", 95)
 
-    def um_per_pixel_raw_1x(self):
-        return self.j.get("um_per_pixel_raw_1x", None)
-
     def ff_cal_fn(self):
-        return get_microscope_data_dir() + "/imager_calibration_ff.tif"
+        return os.path.join(self.microscope.usc.get_microscope_data_dir(),
+                            "imager_calibration_ff.tif")
 
     def has_ff_cal(self):
         return os.path.exists(self.ff_cal_fn())
@@ -300,13 +277,84 @@ class USCImager:
     def videoflip_method(self):
         return self.j.get("videoflip_method", None)
 
+    def cal_fn_data(self):
+        return os.path.join(self.microscope.usc.get_microscope_data_dir(),
+                            "imager_calibration.j5")
+
+    def cal_fn_microscope(self):
+        return os.path.join(self.microscope.usc.get_config_dir(),
+                            "imager_calibration.j5")
+
+    def cal_load(self, load_data_dir=True):
+        def load_config(fn):
+            try:
+                if not fn:
+                    return {}
+                if not os.path.exists(fn):
+                    return {}
+                configj = readj(fn)
+                configs = configj["configs"]
+                config = configs["default"]
+                #if source and config["source"] != source:
+                #    raise ValueError("Source mismatches in config file")
+                if "disp_properties" not in config:
+                    raise ValueError("Old config format")
+                return config["disp_properties"]
+            except Exception as e:
+                print("WARNING: Failed to load cal: %s" % (e, ))
+                return {}
+
+        # configs/ls-hvy-1/imager_calibration.j5
+        microscopej = load_config(self.cal_fn_microscope())
+        if not load_data_dir:
+            return microscopej
+        # Take defaults from dataj, the user directory
+        # data/microscopes/ls-hvy-1/imager_calibration.j5
+        dataj = load_config(self.cal_fn_data())
+        for k, v in dataj.items():
+            microscopej[k] = v
+        return microscopej
+
+    def cal_save_to_data(self, source, disp_properties, mkdir=False):
+        if mkdir and not os.path.exists(self.microscope.bc.get_data_dir()):
+            os.mkdir(self.microscope.bc.get_data_dir())
+        jout = {
+            "configs": {
+                "default": {
+                    "source": source,
+                    "disp_properties": disp_properties
+                }
+            }
+        }
+        writej(self.cal_fn_data(), jout)
+
+    def native_pixel_pitch_um(self):
+        """
+        "pixel size" at max camera resolution
+        The number you find in the datasheet
+        Assumes square pixels
+        Only used for checking calibration
+        """
+        return self.j.get("native_pixel_pitch_um")
+
+    def hardware_resolution_scalar(self):
+        """
+        Scalar going from native pixel resolution to selected resolution
+        Ex: native 1000 wide, but selected 500 wide
+        Returns 0.5
+        """
+        native_w_pix, _native_h_pix = self.native_wh()
+        this_w_pix, _this_h_pix = self.raw_wh()
+        return this_w_pix / native_w_pix
+
 
 class USCMotion:
-    def __init__(self, j=None):
+    def __init__(self, j=None, microscope=None):
         """
         j: usj["motion"]
         """
         self.j = j
+        self.microscope = microscope
         # See set_axes() for more fine grained control
         # Usually this is a reasonable approximation
         # Iterate (list, dict, etc) to reserve for future metadata if needed
@@ -521,15 +569,35 @@ class USCMotion:
             return bool(v)
 
     def axes(self):
+        """
+        Some systems don't use all axes
+        Ex: system might just be XY with Z N/C
+        """
         return set(self.j.get("axes", "xyz"))
+
+    def damper(self):
+        """
+        Turn down acceleration and velocity
+        Hack to slow down a system that's too aggressive
+        Typically used when samples aren't fixtured down well enough
+        Otherwise you can jog slower but scan G0 will be too aggressive
+
+        WARNING: assumes you are configuring velocity / acceleration at startup
+        Otherwise will "compound" each time you start up
+        """
+        ret = self.j.get("damper", None)
+        if ret is not None:
+            assert 0 < ret <= 1.0
+        return ret
 
 
 class USCPlanner:
-    def __init__(self, j={}):
+    def __init__(self, j={}, microscope=None):
         """
         j: usj["planner"]
         """
         self.j = j
+        self.microscope = microscope
 
     def overlap(self):
         """
@@ -546,11 +614,12 @@ class USCPlanner:
 
 
 class USCKinematics:
-    def __init__(self, j={}):
+    def __init__(self, j={}, microscope=None):
         """
         j: usj["kinematics"]
         """
         self.j = j
+        self.microscope = microscope
 
     """
     Full motion delay: NA / tsettle_motion_na1() + tsettle_motion()
@@ -594,12 +663,61 @@ class USCKinematics:
         # Set a semi-reasonable default
         return float(self.j.get("tsettle_hdr", 0.2))
 
+    def frame_sync(self):
+        # Recommended for real imagers
+        return bool(self.j.get("frame_sync", True))
+
+
+class USCOptics:
+    def __init__(self, j=None, microscope=None):
+        self.j = j
+        self.microscope = microscope
+
+    def image_wh_raw_1x_mm(self):
+        """
+        1x "objective", not 1x magnification on sensor
+        Relay, barlow, etc lens may significantly alter this from actual sensor size
+        No cropping applied
+        """
+        return self.j.get("image_width_1x_mm"), self.j.get(
+            "image_height_1x_mm")
+
+    def um_per_pixel_raw_1x(self):
+        """
+        1x "objective", not 1x magnification on sensor at selected resolution
+        raw => non-scaled image at selected resolution
+        Relay, barlow, etc lens may significantly alter this from actual pixel size
+        """
+        # Directly specified?
+        ret = self.j.get("um_per_pixel_raw_1x", None)
+        if ret is not None:
+            return ret
+        # Fallback to calculating based on resolution
+        this_w_pix, _this_h_pix = self.microscope.usc.imager.raw_wh()
+        w_mm, _h_mm = self.image_wh_raw_1x_mm()
+        w_um = w_mm * 1000
+        return w_um / this_w_pix
+
+    def diffusion(self):
+        """
+        "diffusion": {
+            "red": 2.0,
+            "green": 2.0,
+            "blue": 4.0,
+        }
+        """
+        return self.j.get("optics", None)
+
 
 class USCImageProcessingPipeline:
-    def __init__(self, j={}):
+    def __init__(self, j={}, microscope=None):
         self.j = j
+        self.microscope = microscope
 
-    def pipeline_last(self):
+    def pipeline_first(self):
+        return self.j.get("pipeline_first", [])
+
+    def snapshot_correction(self):
         """
         Get image processing pipeline configuration
         "ipp": [
@@ -607,7 +725,7 @@ class USCImageProcessingPipeline:
             {"plugin": "correct-vm1v1", "config": {"kernel_width": 3}},
         ],
         """
-        return self.j.get("pipeline_last", [])
+        return self.j.get("snapshot_correction", [])
 
     # plugin specific options
     def get_plugin(self, name):
@@ -691,26 +809,118 @@ class ObjectiveDB:
                 objectivej[k] = v
 
 
-# Microscope usj config parser
+"""
+Microscope usj config parser
+"""
+
+
 class USC:
-    def __init__(self, usj=None):
-        if usj is None:
-            usj = get_usj()
-        self.usj = usj
-        self.imager = USCImager(self.usj.get("imager"))
-        self.motion = USCMotion(self.usj.get("motion"))
-        self.planner = USCPlanner(self.usj.get("planner", {}))
-        self.kinematics = USCKinematics(self.usj.get("kinematics", {}))
-        self.ipp = USCImageProcessingPipeline(self.usj.get("ipp", {}))
-        self.apps = {}
+    default_microscope_name = None
+
+    @staticmethod
+    def has_default_microscope_name():
+        return bool(USC.default_microscope.name)
+
+    def __init__(self, usj=None, microscope=None, config_dir=None):
+        # Crude microscope object defining name + serial number
+        # No other fields are expected to be initialized
+        assert microscope is not None, "Microscope is required"
+        # Used for data dir configuration (ex: serial number)
+        self.microscope = microscope
         self.bc = get_bc()
+        if usj is None:
+            usj = self.get_usj(config_dir=config_dir)
+        self.usj = usj
+        self.init_dirs()
+
+        self.imager = USCImager(self.usj.get("imager"),
+                                microscope=self.microscope)
+        self.motion = USCMotion(self.usj.get("motion"),
+                                microscope=self.microscope)
+        self.planner = USCPlanner(self.usj.get("planner", {}),
+                                  microscope=self.microscope)
+        self.kinematics = USCKinematics(self.usj.get("kinematics", {}),
+                                        microscope=self.microscope)
+        self.optics = USCOptics(self.usj.get("optics", {}),
+                                microscope=self.microscope)
+        self.ipp = USCImageProcessingPipeline(self.usj.get("ipp", {}),
+                                              microscope=self.microscope)
+        self.apps = {}
+
+    def get_usj(self, config_dir=None):
+        if config_dir is None:
+            config_dir = os.path.join(get_configs_dir(), self.microscope.name)
+        self._config_dir = config_dir
+
+        # XXX: it would be possible to do an out of tree microscope config now using dconfig
+        # might be useful for testing?
+
+        # Check if user has patches
+        dconfig = None
+        bc_system = self.bc.get_system(self.microscope)
+        if bc_system:
+            dconfig = bc_system.get("dconfig", None)
+
+        fn = os.path.join(config_dir, "microscope.j5")
+        if not os.path.exists(fn):
+            fn = os.path.join(config_dir, "microscope.json")
+        if not os.path.exists(fn):
+            if dconfig is not None:
+                print(
+                    f"WARNING: failed to find microscope {self.microscope.name} but found dconfig. Out of tree configuration?"
+                )
+                usj = {}
+            else:
+                raise Exception("couldn't find microscope.j5 in %s" %
+                                config_dir)
+        else:
+            with open(fn) as f:
+                usj = json5.load(f, object_pairs_hook=OrderedDict)
+
+        if dconfig is not None:
+            jsond.apply_update(usj, dconfig)
+
+        return usj
+
+    def get_microscope_data_dir(self, mkdir=True):
+        return self._microscope_data_dir
+
+    """
+    def has_microscope_name(self):
+        return bool(self.microscope) and bool(self.microscope.name) 
+
+    def set_microscope_name(self, name):
+        self.microscope.name = name
+    """
+
+    def get_config_dir(self):
+        return self._config_dir
+
+    def get_microscope_dataname(self):
+        return self._microscope_dataname
+
+    def init_dirs(self, mkdir=True):
+        def get_microscope_dataname():
+            # Add serial if possible
+            # Otherwise calibration files for one unit may conflict with another
+            serial = self.microscope.serial()
+            if serial is not None:
+                return f"{self.microscope.name}_sn-{serial}"
+            else:
+                return f"{self.microscope.name}"
+
+        self._microscope_dataname = get_microscope_dataname()
+        self._microscope_data_dir = os.path.join(self.bc.get_microscopes_dir(),
+                                                 self._microscope_dataname)
+        if not os.path.exists(self._microscope_data_dir):
+            os.mkdir(self._microscope_data_dir)
 
     def app_register(self, name, cls):
         """
         Register app name with class cls
         """
         j = self.usj.get("apps", {}).get(name, {})
-        self.apps[name] = cls(j=j)
+        self.apps[name] = cls(j=j, microscope=self.microscope)
 
     def app(self, name):
         return self.apps[name]
@@ -721,6 +931,8 @@ class USC:
         In the future we might use other info
         Expect file to have a default entry with null key or might consie
         """
+        if microscope:
+            self.microscope = microscope
         if microscope and microscope.imager:
             camera_sn = microscope.imager.get_sn()
         else:
@@ -829,111 +1041,17 @@ def set_usj(j):
     usj = j
 
 
-def get_data_dir(mkdir=True):
-    ret = os.getenv("PYUSCOPE_DATA_DIR", "data")
-    if not os.path.exists(ret) and mkdir:
-        os.mkdir(ret)
-    return ret
-
-
-def get_scan_dir(mkdir=True):
-    ret = os.path.join(get_data_dir(mkdir=mkdir), "scan")
-    if not os.path.exists(ret) and mkdir:
-        os.mkdir(ret)
-    return ret
-
-
-def get_snapshot_dir(mkdir=True):
-    ret = os.path.join(get_data_dir(mkdir=mkdir), "snapshot")
-    if not os.path.exists(ret) and mkdir:
-        os.mkdir(ret)
-    return ret
-
-
-def get_microscopes_dir(mkdir=True):
-    ret = os.path.join(get_data_dir(mkdir=mkdir), "microscopes")
-    if not os.path.exists(ret) and mkdir:
-        os.mkdir(ret)
-    return ret
-
-
-def init_data_dir(microscope_name):
-    microscope_name = default_microscope_name(microscope_name)
-    data_dir = get_data_dir()
-
-    if not os.path.exists(data_dir):
-        os.mkdir(data_dir)
-    scan_dir = os.path.join(data_dir, "scan")
-    if not os.path.exists(scan_dir):
-        os.mkdir(scan_dir)
-    snapshot_dir = os.path.join(data_dir, "snapshot")
-    if not os.path.exists(snapshot_dir):
-        os.mkdir(snapshot_dir)
-    microscopes_dir = os.path.join(data_dir, "microscopes")
-    if not os.path.exists(microscopes_dir):
-        os.mkdir(microscopes_dir)
-    microscope_name_dir = os.path.join(microscopes_dir, microscope_name)
-    if not os.path.exists(microscope_name_dir):
-        os.mkdir(microscope_name_dir)
-
-
 def get_configs_dir():
     # Assume for now its next to package
     return os.path.realpath(
         os.path.dirname(os.path.realpath(__file__)) + "/../configs")
 
 
-def get_config_dir(name=None):
-    global config_dir
-
-    if config_dir:
-        return config_dir
-    microscope_name = default_microscope_name(name)
-
-    config_dir = os.path.join(get_configs_dir(), microscope_name)
-    return config_dir
-
-
-def get_usj(config_dir=None, name=None):
-    global usj
-
-    if usj is not None:
-        return usj
-    if not config_dir:
-        config_dir = get_config_dir(name=name)
-    globals()["config_dir"] = config_dir
-
-    fn = os.path.join(config_dir, "microscope.j5")
-    if not os.path.exists(fn):
-        fn = os.path.join(config_dir, "microscope.json")
-        if not os.path.exists(fn):
-            raise Exception("couldn't find microscope.j5 in %s" % config_dir)
-    with open(fn) as f:
-        j = json5.load(f, object_pairs_hook=OrderedDict)
-
-    def default(rootj, rootd):
-        for k, v in rootd.items():
-            if not k in rootj:
-                rootj[k] = v
-            elif type(v) is dict:
-                default(rootj[k], v)
-
-    default(j, defaults)
-    usj = j
-
-    if name:
-        init_data_dir(name)
-
-    return usj
-
-
-def get_usc(usj=None, config_dir=None, name=None):
+def get_usc(usj=None, config_dir=None, microscope=None):
     global usc
 
     if usc is None:
-        if usj is None:
-            usj = get_usj(config_dir=config_dir, name=name)
-        usc = USC(usj=usj)
+        usc = USC(usj=usj, config_dir=config_dir, microscope=microscope)
     return usc
 
 
@@ -1054,7 +1172,7 @@ def validate_pconfig(pj, strict=False):
     pass
 
 
-class GUI(object):
+class GUI:
     assets_dir = os.path.join(os.getcwd(), 'uscope', 'gui', 'assets')
     stylesheet_file = os.path.join(assets_dir, 'main.qss')
     icon_files = {}
@@ -1085,6 +1203,79 @@ class BaseConfig:
         self.objective_db = ObjectiveDB()
         # self.joystick = JoystickConfig(jbc=self.j.get("joystick", {}))
 
+        self._enblend_cli = None
+        self._enfuse_cli = None
+        self._align_image_stack_cli = None
+
+        self.init_dirs()
+        self.cache_constants()
+
+    def init_dirs(self):
+        self._data_dir = os.getenv("PYUSCOPE_DATA_DIR", "data")
+        if not os.path.exists(self._data_dir):
+            os.mkdir(self._data_dir)
+
+        self._scan_dir = os.path.join(self.get_data_dir(), "scan")
+        if not os.path.exists(self._scan_dir):
+            os.mkdir(self._scan_dir)
+
+        self._snapshot_dir = os.path.join(self.get_data_dir(), "snapshot")
+        if not os.path.exists(self._snapshot_dir):
+            os.mkdir(self._snapshot_dir)
+
+        self._microscopes_dir = os.path.join(self.get_data_dir(),
+                                             "microscopes")
+        if not os.path.exists(self._microscopes_dir):
+            os.mkdir(self._microscopes_dir)
+
+        self._batch_data_dir = os.path.join(self.get_data_dir(), "batch")
+        if not os.path.exists(self._batch_data_dir):
+            os.mkdir(self._batch_data_dir)
+
+        self._script_data_dir = os.path.join(self.get_data_dir(), "script")
+        if not os.path.exists(self._script_data_dir):
+            os.mkdir(self._script_data_dir)
+
+    def cache_constants(self):
+        raw = self.j.get("timeout_scalar", "1.0")
+        if raw is None:
+            print("WARNING: timeouts are disabled. Software may lock up")
+            self._timeout_scalar = None
+        else:
+            self._timeout_scalar = float(raw)
+            if self._timeout_scalar <= 0:
+                raise ValueError(
+                    f"Invalid timouet scalar {self._timeout_scalar}")
+            if self._timeout_scalar < 1:
+                print(
+                    "WARNING: timeout scalar is below recommended value. Software may crash without cause"
+                )
+
+    def get_data_dir(self):
+        return self._data_dir
+
+    def get_scan_dir(self):
+        return self._scan_dir
+
+    def get_snapshot_dir(self):
+        return self._snapshot_dir
+
+    def get_microscopes_dir(self):
+        return self._microscopes_dir
+
+    def batch_data_dir(self):
+        """
+        Directory holding saved batch scans
+        Note: this doesn't include the "working" state saved in the GUI
+        """
+        return self._batch_data_dir
+
+    def script_data_dir(self):
+        """
+        Directory holding saved script parameters
+        """
+        return self._script_data_dir
+
     def labsmore_stitch_use_xyfstitch(self):
         """
         xyfstitch is the newer higher fidelity stitch engine
@@ -1092,6 +1283,13 @@ class BaseConfig:
         and uses a very different algorithm to stitch vs stock
         """
         return bool(self.j.get("labsmore_stitch", {}).get("use_xyfstitch"))
+
+    def labsmore_stitch_save_cloudshare(self):
+        """
+        If this setting is true, then tell the sticher to copy
+        the generated zoomable files to the served cloudshare bucket.
+        """
+        return bool(self.j.get("labsmore_stitch", {}).get("cloudshare"))
 
     def labsmore_stitch_aws_access_key(self):
         return self.j.get("labsmore_stitch", {}).get("aws_access_key")
@@ -1105,11 +1303,23 @@ class BaseConfig:
     def labsmore_stitch_notification_email(self):
         return self.j.get("labsmore_stitch", {}).get("notification_email")
 
+    def labsmore_stitch_plausible(self):
+        return self.labsmore_stitch_aws_access_key(
+        ) and self.labsmore_stitch_aws_secret_key(
+        ) and self.labsmore_stitch_aws_id_key(
+        ) and self.labsmore_stitch_notification_email()
+
     def argus_stitch_cli(self):
         """
         Call given program with the scan output directory as the argument
         """
         return self.j.get("argus_stitch_cli", None)
+
+    def argus_cs_auto_path(self):
+        """
+        Override with a custom stitching program
+        """
+        return self.j.get("argus_cs_auto", "./utils/cs_auto.py")
 
     def dev_mode(self):
         """
@@ -1117,12 +1327,94 @@ class BaseConfig:
         """
         return self.j.get("dev_mode", False)
 
-    def script_rhodium_dir(self):
+    def script_dirs(self):
         """
         The path to the secondary script dir
-        Allows quick access to pyuscope-rhodium
+        Allows quick access to pyuscope-kitchen, pyuscope-rhodium, your plugins
         """
-        return self.j.get("script_rhodium_dir", None)
+        return self.j.get("script_dirs", {})
+
+    def get_system(self, microscope):
+        systems = self.j.get("systems", [])
+        for system in systems:
+            if system["microscope"] == microscope.name:
+                return system
+        return None
+
+    def get_joystick(self, guid):
+        systems = self.j.get("joysticks", [])
+        for system in systems:
+            if system["guid"] == guid:
+                return system
+        return None
+
+    def check_panotools(self):
+        """
+        Check / configure all panotools paths
+        Return True if they are configured correctly
+        """
+        ret = True
+        ret = ret and bool(self.enblend_cli())
+        ret = ret and bool(self.enfuse_cli())
+        ret = ret and bool(self.align_image_stack_cli())
+        return ret
+
+    def enblend_cli(self):
+        if self._enblend_cli:
+            return self._enblend_cli
+        self._enblend_cli = find_panotools_exe(self.j.get("panotools",
+                                                          {}), "enblend_cli",
+                                               "enblend", "enblend")
+        return self._enblend_cli
+
+    def enfuse_cli(self):
+        """
+        flatpak run --command=enfuse net.sourceforge.Hugin --help
+        """
+        if self._enfuse_cli:
+            return self._enfuse_cli
+        self._enfuse_cli = find_panotools_exe(self.j.get("panotools", {}),
+                                              "enfuse_cli", "enfuse", "enfuse")
+        return self._enfuse_cli
+
+    def align_image_stack_cli(self):
+        if self._align_image_stack_cli:
+            return self._align_image_stack_cli
+        self._align_image_stack_cli = find_panotools_exe(
+            self.j.get("panotools", {}), "align_image_stack_cli",
+            "align_image_stack", "align_image_stack")
+        return self._align_image_stack_cli
+
+    def timeout_scalar(self):
+        """
+        Sigh
+        https://github.com/Labsmore/pyuscope/issues/400
+        System is overheating / underpowered and sometimes failing real time requirements
+        """
+        return self._timeout_scalar
+
+    def timeout_scalar_scale(self, val):
+        if self._timeout_scalar:
+            return self._timeout_scalar * val
+        # Timeout disabled
+        else:
+            return None
+
+    def check_threads(self):
+        return os.getenv("PYUSCOPE_CHECK_THREADS",
+                         "N") == "Y" or self.dev_mode()
+
+    def stress_test(self):
+        """
+        Random sleeps, consume extra CPU, extra RAM
+        """
+        return bool(self.j.get("stress_test", False))
+
+    def profile(self):
+        """
+        Record memory / CPU utilization
+        """
+        return bool(self.j.get("profile", False))
 
 
 def get_bcj():
@@ -1145,18 +1437,3 @@ def get_bc(j=None):
             j = get_bcj()
         bc = BaseConfig(j=j)
     return bc
-
-
-def lazy_load_microscope_from_config(directory):
-    """
-    If user arguments haven't already set, set the default microscope from uscan.json
-    Intended for CLI processing applications
-    """
-    if not has_default_microscope_name():
-        scan_fn = os.path.join(directory, "uscan.json")
-        if os.path.exists(scan_fn):
-            with open(scan_fn) as f:
-                scanj = json.load(f)
-            microscope_name = scanj["pconfig"]["app"]["microscope"]
-            print(f"Scan taken with microscope {microscope_name}")
-            default_microscope_name(microscope_name)

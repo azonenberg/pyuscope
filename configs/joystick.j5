@@ -2,16 +2,18 @@
 //names are really unstable across pygame versions
 {
     "Logitech Extreme 3D": {
-        "function_map": {
+        "events": [
+            {
+                "function": "take_snapshot",
+                "event": "JOYBUTTONDOWN",
+                "button_id": 0
+            },
+        ],
+        "poll": {
             "axis_set_jog_slider_value": {
                 "args": {
                     "id": 3
                 }
-            },
-            "btn_capture_image": {
-                "args": {
-                    "id": 0,
-                },
             },
             "axis_move_x": {
                 "args": {
@@ -27,11 +29,20 @@
                 "threshold": 0.1,
                 "scalar": -1.0,
             },
+            //2024-01-09: https://github.com/Labsmore/pyuscope/issues/385
+            //Was a bit of back and forth, settled on having both enabled
             "hat_move_z": {
                 "args": {
                     "id": 0,
                     "idx": 1,
                 },
+                "scalar": 1.0,
+            },
+            "axis_move_z": {
+                "args": {
+                    "id": 2,
+                },
+                "threshold": 0.1,
                 "scalar": 1.0,
             }
         },
@@ -52,15 +63,27 @@
     "0300ea9f6d04000015c2000011010000": {
         "alias": "Logitech Extreme 3D",
     },
-
+    /*
+    Yusuf joystick
+    joystick Logitech Extreme 3D pro 030000006d04000015c2000011010000
+    */
+    "030000006d04000015c2000011010000": {
+        "alias": "Logitech Extreme 3D",
+    },
+    //marc joystick
+    "0300eb556d04000015c2000010010000": {
+        "alias": "Logitech Extreme 3D",
+    },
 
     "CH Products IP Desktop": {
-        "function_map": {
-            "btn_capture_image": {
-                "args": {
-                    "id": 0,
-                },
+        "events": [
+            {
+                "function": "take_snapshot",
+                "event": "JOYBUTTONDOWN",
+                "button_id": 0
             },
+        ],
+        "poll": {
             "axis_move_x": {
                 "args": {
                     "id": 0,
