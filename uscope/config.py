@@ -74,8 +74,8 @@ def find_panotools_exe(config, configk, exe_name, flatpak_name):
         _stdout, _stderr = process.communicate()
         exit_code = process.wait()
         if exit_code == 0:
-            return ("flatpak", "run",
-                    f"--command={flatpak_name} net.sourceforge.Hugin")
+            return ("flatpak", "run", "--filesystem=host",
+                    f"--command={flatpak_name}", "net.sourceforge.Hugin")
     # FIME: catch the specific exception for command not found
     except:
         pass
@@ -754,7 +754,7 @@ class ObjectiveDB:
     def get(self, vendor, model):
         return self.db[(vendor.upper(), model.upper())]
 
-    def set_defaults(self, objectivejs):
+    def set_defaults_list(self, objectivejs):
         for objectivej in objectivejs:
             self.set_default(objectivej)
 
@@ -1203,7 +1203,7 @@ class BaseConfig:
         self.objective_db = ObjectiveDB()
         # self.joystick = JoystickConfig(jbc=self.j.get("joystick", {}))
 
-        self._enblend_cli = None
+        # self._enblend_cli = None
         self._enfuse_cli = None
         self._align_image_stack_cli = None
 
@@ -1354,11 +1354,12 @@ class BaseConfig:
         Return True if they are configured correctly
         """
         ret = True
-        ret = ret and bool(self.enblend_cli())
+        # ret = ret and bool(self.enblend_cli())
         ret = ret and bool(self.enfuse_cli())
         ret = ret and bool(self.align_image_stack_cli())
         return ret
 
+    '''
     def enblend_cli(self):
         if self._enblend_cli:
             return self._enblend_cli
@@ -1366,6 +1367,7 @@ class BaseConfig:
                                                           {}), "enblend_cli",
                                                "enblend", "enblend")
         return self._enblend_cli
+    '''
 
     def enfuse_cli(self):
         """
@@ -1415,6 +1417,12 @@ class BaseConfig:
         Record memory / CPU utilization
         """
         return bool(self.j.get("profile", False))
+
+    def qr_regex(self):
+        return self.j.get("qr_regex", None)
+
+    def instruments(self):
+        return self.j.get("instruments", {})
 
 
 def get_bcj():

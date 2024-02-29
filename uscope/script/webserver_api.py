@@ -33,6 +33,8 @@ $ curl 'http://localhost:8080/set/active_objective/1000X'; echo
 """
 
 from uscope.gui.scripting import ArgusScriptingPlugin
+from uscope.script import webserver_common
+
 from multiprocessing import Process
 from flask import Flask, request, current_app
 from http import HTTPStatus
@@ -41,14 +43,12 @@ from threading import Thread
 from werkzeug.serving import make_server
 
 app = Flask(__name__)
-SERVER_PORT = 8080
-HOST = '127.0.0.1'
 
 
 class ServerThread(Thread):
-    def __init__(self):
+    def __init__(self, host='127.0.0.1', port=8080):
         super().__init__()
-        self.server = make_server(host=HOST, port=SERVER_PORT, app=app)
+        self.server = make_server(host=host, port=port, app=app)
         self.ctx = app.app_context()
         self.ctx.push()
 
@@ -61,19 +61,52 @@ class ServerThread(Thread):
 
 class Plugin(ArgusScriptingPlugin):
     def __init__(self, *args, **kwargs):
+        webserver_common.plugin = self
         super().__init__(*args, **kwargs)
         self.verbose = True
+
+    def input_config(self):
+        return {
+            "Port": {
+                "widget": "QLineEdit",
+                "type": int,
+                "key": "port",
+                "default": "8080"
+            },
+            "Start localhost only": {
+                "widget": "QPushButton",
+                "value": "localhost",
+            },
+            "Start network accessible": {
+                "widget": "QPushButton",
+                "value": "network",
+            },
+        }
 
     def log_verbose(self, msg):
         if self.verbose:
             self.log(msg)
 
+    def show_run_button(self):
+        return False
+
     def run_test(self):
-        self.log(f"Running Pyuscope Webserver Plugin on port: {SERVER_PORT}")
+        mode = self.get_input().get("button", {}).get("value")
+
+        if mode == "localhost":
+            host = "127.0.0.1"
+        elif mode == "network":
+            host = "0.0.0.0"
+        else:
+            assert 0, f"bad mode {host}"
+
+        vals = self.get_input()
+        port = vals["port"]
+        self.log(f"Running pyuscope webserver (bind: {host}) on port {port}")
         self.objectives = self._ac.microscope.get_objectives()
         # Keep a reference to this plugin
         app.plugin = self
-        self.server = ServerThread()
+        self.server = ServerThread(host=host, port=port)
         self.server.start()
         # Keep plugin alive while server is running
         while self.server and self.server.is_alive():
@@ -84,44 +117,4 @@ class Plugin(ArgusScriptingPlugin):
         self.server.join()
 
 
-@app.route('/get/objectives', methods=['GET'])
-def objectives():
-    plugin = current_app.plugin
-    objectives = plugin.get_objectives_config()
-    plugin.log_verbose(f"/get/objectives")
-    data = {'objectives': objectives}
-    return json.dumps({
-        'data': data,
-        'status': HTTPStatus.OK,
-    })
-
-
-@app.route('/get/active_objective', methods=['GET'])
-def active_objective():
-    plugin = current_app.plugin
-    objective = plugin.get_active_objective()
-    plugin.log_verbose(f"/get/active_objective: '{objective}'")
-    data = {'objective': objective}
-    return json.dumps({
-        'data': data,
-        'status': HTTPStatus.OK,
-    })
-
-
-@app.route('/set/active_objective/<objective>', methods=['GET', 'POST'])
-def active_objective_set(objective):
-    plugin = current_app.plugin
-    try:
-        # Validate objective name before sending request
-        plugin.log_verbose(f"/set/active_objective/{objective}")
-        if objective not in plugin.objectives.names():
-            plugin.log(f"WARNING: objective '{objective}' not found")
-            return json.dumps({'status': HTTPStatus.BAD_REQUEST})
-        plugin.set_active_objective(objective)
-        return json.dumps({'status': HTTPStatus.OK})
-    except Exception as e:
-        print(e)
-        return json.dumps({
-            'status': HTTPStatus.INTERNAL_SERVER_ERROR,
-            'error': f"{type(e)}: {e}"
-        })
+webserver_common.make_app(app)

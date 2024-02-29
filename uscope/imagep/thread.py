@@ -3,12 +3,14 @@ from uscope.imager.imager_util import get_scaled
 from uscope.imagep.pipeline import CSImageProcessor
 from uscope.imager.autofocus import Autofocus
 from uscope.threads import CommandThreadBase
+from uscope.imagep.util import find_qr_code_match
 
 import threading
 import queue
 import traceback
 from PIL import Image
 from uscope.microscope import MicroscopeStop
+import os.path
 
 
 class ImageProcessingThreadBase(CommandThreadBase):
@@ -19,6 +21,7 @@ class ImageProcessingThreadBase(CommandThreadBase):
             "process_image": self._do_process_image,
         }
 
+        self.autofocus_running = False
         self.ip = None
         self.ip = CSImageProcessor(microscope=microscope)
         self.ip.start()
@@ -46,6 +49,7 @@ class ImageProcessingThreadBase(CommandThreadBase):
 
     def _do_auto_focus(self, j):
         try:
+            self.autofocus_running = True
             af = Autofocus(
                 self.microscope,
                 move_absolute=self.microscope.motion_thread.move_absolute,
@@ -57,6 +61,8 @@ class ImageProcessingThreadBase(CommandThreadBase):
         except MicroscopeStop:
             self.log("Autofocus cancelled")
             raise
+        finally:
+            self.autofocus_running = False
 
     def process_image(self, options, block=False, callback=None):
         # if "objective_config" not in options:
@@ -96,6 +102,12 @@ class ImageProcessingThreadBase(CommandThreadBase):
             return None
 
         if "save_filename" in options:
+            if "qr_regex" in options:
+                qr_match = find_qr_code_match(image, options.get("qr_regex"))
+                if qr_match:
+                    base_name, ext = os.path.splitext(options["save_filename"])
+                    save_filename = base_name + "_" + qr_match + ext
+                    options["save_filename"] = save_filename
             kwargs = {}
             if "save_quality" in options:
                 kwargs["quality"] = options["save_quality"]

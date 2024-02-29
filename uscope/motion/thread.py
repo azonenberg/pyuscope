@@ -74,6 +74,10 @@ class MotionThreadMotion(MotionHAL):
     def command(self, command):
         return self.mt.mdi(command)
 
+    def system_status_ts(self, status):
+        # FIXME: this won't handle jogging quite correctly
+        status["idle"] = self.mt.idle.is_set()
+
 
 """
 Several sources need to periodically send jog commands based on stimulus
@@ -163,6 +167,9 @@ class JogController:
 class MotionThreadBase(CommandThreadBase):
     def __init__(self, microscope):
         super().__init__(microscope)
+        if self.microscope.bc.check_threads():
+            print("Motion thread init (main thread): %s" %
+                  (threading.get_ident(), ))
         self.verbose = False
         self.queue = queue.Queue()
         self.motion = None
@@ -174,7 +181,7 @@ class MotionThreadBase(CommandThreadBase):
         self.lock = threading.Event()
         # Let main gui get the last position from a different thread
         # It can request updates
-        self.pos_cache = None
+        self._pos_cache = None
         self._stop = False
         self._estop = False
         # XXX: add config directive
@@ -340,10 +347,13 @@ class MotionThreadBase(CommandThreadBase):
         else:
             self.log("WARNING: jog disabled, dropping jog cancel")
 
+    def get_pos_cache(self):
+        return self._pos_cache
+
     def run(self):
-        self.verbose and print("Motion thread started: %s" %
-                               (threading.get_ident(), ))
-        self.motion.updte_motion_thread()
+        if self.microscope.bc.check_threads():
+            print("Motion thread started: %s" % (threading.get_ident(), ))
+        self.motion.update_check_thread()
         self.motion.check_thread_safety()
         self.running.set()
         self.idle.clear()
@@ -351,7 +361,7 @@ class MotionThreadBase(CommandThreadBase):
 
         def motion_status(status):
             # print("register_status_cb: via motion-status: %s" % (status,))
-            self.pos_cache = status["pos"]
+            self._pos_cache = status["pos"]
 
         self.motion.register_status_cb(motion_status)
 
@@ -420,7 +430,7 @@ class MotionThreadBase(CommandThreadBase):
 
                 def update_pos_cache():
                     pos = self.motion.pos()
-                    self.pos_cache = pos
+                    self._pos_cache = pos
                     # print("register_status_cb: via update_pos_cache: %s" % (pos,))
 
                 self.verbose and print("")
@@ -475,6 +485,9 @@ class MotionThreadBase(CommandThreadBase):
                     print(traceback.format_exc())
                     if command_done:
                         command_done(command, args, e)
+                    if self.microscope.bc.dev_mode():
+                        import sys
+                        sys.exit(1)
                     continue
                 # motion command update_pos_cache completed in 0.006439208984375
                 # motion command jog_fractioned completed in 0.021370649337768555

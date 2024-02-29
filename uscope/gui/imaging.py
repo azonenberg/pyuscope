@@ -6,6 +6,7 @@ from uscope.motion import motion_util
 from uscope.benchmark import Benchmark
 from uscope.app.argus.threads import QPlannerThread
 from uscope.microscope import StopEvent, MicroscopeStop
+from uscope import version as uscope_version
 
 from PyQt5 import Qt
 from PyQt5.QtGui import *
@@ -16,6 +17,7 @@ import os.path
 import datetime
 from io import StringIO
 import threading
+import time
 
 
 def snapshot_fn(user, extension, parent):
@@ -194,7 +196,7 @@ class MotionWidget(AWidget):
         self.log("Move absolute to %s" %
                  self.ac.usc.motion.format_positions(pos))
         self.log("  From %s" % self.ac.usc.motion.format_positions(
-            self.ac.motion_thread.pos_cache))
+            self.ac.motion_thread.get_pos_cache()))
         self.motion_thread.move_absolute(pos)
 
     def move_rel_le_process(self):
@@ -206,7 +208,7 @@ class MotionWidget(AWidget):
             return
         self.log("Move relative %s" % self.ac.usc.motion.format_positions(pos))
         self.log("  From %s" % self.ac.usc.motion.format_positions(
-            self.ac.motion_thread.pos_cache))
+            self.ac.motion_thread.get_pos_cache()))
         self.motion_thread.move_relative(pos)
 
     def mdi_le_process(self):
@@ -216,7 +218,7 @@ class MotionWidget(AWidget):
             self.motion_thread.mdi(s)
 
     def set_difference_pb_pushed(self):
-        pos = self.ac.motion_thread.pos_cache
+        pos = self.ac.motion_thread.get_pos_cache()
         self.reference_le.setText(self.ac.usc.motion.format_positions(pos))
 
     def reference_moveto_pb_pushed(self):
@@ -229,7 +231,7 @@ class MotionWidget(AWidget):
 
     def update_reference(self):
         def get_str():
-            pos = self.ac.motion_thread.pos_cache
+            pos = self.ac.motion_thread.get_pos_cache()
             if pos is None:
                 return "Invalid"
 
@@ -391,6 +393,7 @@ class JoystickTab(ArgusTab):
 class ObjectiveWidget(AWidget):
 
     setObjective = pyqtSignal(str)
+    setUmPerPixelRaw1x = pyqtSignal(float)
 
     def __init__(self, ac, aname=None, parent=None):
         super().__init__(ac=ac, aname=aname, parent=parent)
@@ -403,9 +406,12 @@ class ObjectiveWidget(AWidget):
         self.selected_objective_name = None
         self.default_objective_index = 0
         self.global_scalar = None
+        self.um_per_pixel_raw_1x = None
         self.updating_objectives = False
+        self.default_objective_name = None
 
         self.setObjective.connect(self.set_objective)
+        self.setUmPerPixelRaw1x.connect(self.set_um_per_pixel_raw_1x)
 
     def _initUI(self):
         self.advanced_widgets = []
@@ -449,7 +455,11 @@ class ObjectiveWidget(AWidget):
             widget.setVisible(visible)
 
     def _post_ui_init(self):
-        pass
+        self.reload_obj_cb()
+
+    def set_um_per_pixel_raw_1x(self, val):
+        self.um_per_pixel_raw_1x = val
+        self.reload_obj_cb()
 
     def reload_obj_cb(self):
         '''Re-populate the objective combo box'''
@@ -458,6 +468,8 @@ class ObjectiveWidget(AWidget):
         self.objectives = self.ac.microscope.get_objectives()
         if self.global_scalar:
             self.objectives.set_global_scalar(self.global_scalar)
+        if self.um_per_pixel_raw_1x:
+            self.objectives.set_um_per_pixel_raw_1x(self.um_per_pixel_raw_1x)
         for name in self.objectives.names():
             self.obj_cb.addItem(name)
 
@@ -515,19 +527,23 @@ class ObjectiveWidget(AWidget):
     Might also be better to select by name
     """
 
-    def _cache_save(self, cachej):
+    def _cache_sn_save(self, cachej):
         cachej["objective"] = {
             "name": self.selected_objective_name,
             "global_scalar": self.global_scalar_le.text(),
+            "um_per_pixel_raw_1x": self.um_per_pixel_raw_1x,
         }
 
-    def _cache_load(self, cachej):
+    def _cache_sn_load(self, cachej):
         j = cachej.get("objective", {})
+
         self.default_objective_name = j.get("name", None)
         self.global_scalar_le.setText(j.get("global_scalar", ""))
         self.global_scalar_le_return(lazy=True)
 
+        self.um_per_pixel_raw_1x = j.get("um_per_pixel_raw_1x", None)
         self.reload_obj_cb()
+        assert self.obj_config, "not loaded :("
         self.obj_cb.currentIndexChanged.connect(self.update_obj_config)
 
     def set_objective(self, objective):
@@ -805,7 +821,7 @@ class XYPlanner2PWidget(PlannerWidget):
         self.plan_y1_le.setText(j.get("y1", ""))
 
     def _poll_misc(self):
-        last_pos = self.ac.motion_thread.pos_cache
+        last_pos = self.ac.motion_thread.get_pos_cache()
         if last_pos:
             self.update_pos(last_pos)
 
@@ -830,7 +846,7 @@ class XYPlanner2PWidget(PlannerWidget):
 
         return ret
 
-    def get_current_scan_config(self):
+    def get_current_planner_hconfig(self):
         contour_json = self.mk_contour_json()
         if not contour_json:
             return
@@ -877,7 +893,7 @@ class XYPlanner2PWidget(PlannerWidget):
         '''
         # take as upper left corner of view area
         # this is the current XY position
-        pos = self.ac.motion_thread.pos_cache
+        pos = self.ac.motion_thread.get_pos_cache()
         #self.ac.log("Updating start pos w/ %s" % (str(pos)))
         self.plan_x0_le.setText(
             self.ac.usc.motion.format_position("x", pos["x"]))
@@ -897,7 +913,7 @@ class XYPlanner2PWidget(PlannerWidget):
     def set_end_pos(self):
         # take as lower right corner of view area
         # this is the current XY position + view size
-        pos = self.ac.motion_thread.pos_cache
+        pos = self.ac.motion_thread.get_pos_cache()
         #self.ac.log("Updating end pos from %s" % (str(pos)))
         self.plan_x1_le.setText(
             self.ac.usc.motion.format_position("x", pos["x"]))
@@ -905,7 +921,7 @@ class XYPlanner2PWidget(PlannerWidget):
             self.ac.usc.motion.format_position("y", pos["y"]))
 
     def corner_clicked(self, corner_name):
-        pos_cur = self.ac.motion_thread.pos_cache
+        pos_cur = self.ac.motion_thread.get_pos_cache()
         widgets = self.corner_widgets[corner_name]
 
         widgets["x_le"].setText(
@@ -1066,7 +1082,7 @@ class XYPlanner3PWidget(PlannerWidget):
                 le.setStyleSheet("background-color: rgb(240, 240, 240);")
 
     def _poll_misc(self):
-        last_pos = self.ac.motion_thread.pos_cache
+        last_pos = self.ac.motion_thread.get_pos_cache()
         if last_pos:
             self.update_pos(last_pos)
 
@@ -1088,7 +1104,7 @@ class XYPlanner3PWidget(PlannerWidget):
 
         return corners
 
-    def get_current_scan_config(self):
+    def get_current_planner_hconfig(self):
         corner_json = self.mk_corner_json()
         if not corner_json:
             return
@@ -1127,7 +1143,7 @@ class XYPlanner3PWidget(PlannerWidget):
         return x_view, y_view
 
     def corner_clicked(self, corner_name):
-        pos_cur = self.ac.motion_thread.pos_cache
+        pos_cur = self.ac.motion_thread.get_pos_cache()
         widgets = self.corner_widgets[corner_name]
 
         widgets["x_le"].setText(
@@ -1307,10 +1323,12 @@ class ImagingTaskWidget(AWidget):
         self.snapshotCaptured.connect(self.captureSnapshot)
         self.go_current_pconfig = go_current_pconfig
         self.setControlsEnabled = setControlsEnabled
-        self.current_scan_config = None
+        self.current_planner_hconfig = None
         self.restore_properties = None
         self.log_fd_scan = None
         self._save_extension = None
+        self.taking_snapshot = False
+        self.planner_progress_cache = None
 
     def _initUI(self):
         def getNameLayout():
@@ -1384,16 +1402,28 @@ class ImagingTaskWidget(AWidget):
         """
         pictures_to_take, pictures_taken, image, first
         """
+        if self.planner_progress_cache is None:
+            self.planner_progress_cache = {}
         if state["type"] == "begin":
+            self.planner_progress_cache["images_to_capture"] = state[
+                "images_to_capture"]
             self.progress_bar.setMinimum(0)
             self.progress_bar.setMaximum(state["images_to_capture"])
             self.progress_bar.setValue(0)
             self.bench = Benchmark(state["images_to_capture"])
         elif state["type"] == "image":
+            cur_time = time.time()
             #self.ac.log('took %s at %d / %d' % (image, pictures_taken, pictures_to_take))
+            self.planner_progress_cache["images_captured"] = state[
+                "images_captured"]
             self.bench.set_cur_items(state["images_captured"])
             self.ac.log('Captured: %s' % (state["image_filename_rel"], ))
-            self.ac.log('%s' % (str(self.bench)))
+            self.planner_progress_cache[
+                "remaining_time"] = self.bench.remaining_time(
+                    cur_time=cur_time)
+            bench_str = self.bench.__str__(cur_time=cur_time)
+            self.planner_progress_cache["eta_message"] = bench_str
+            self.ac.log('%s' % (bench_str))
             self.progress_bar.setValue(state["images_captured"])
         else:
             pass
@@ -1409,8 +1439,9 @@ class ImagingTaskWidget(AWidget):
         self.log_fd_scan = None
 
         self.ac.planner_thread = None
-        last_scan_config = self.current_scan_config
-        self.current_scan_config = None
+        last_scan_config = self.current_planner_hconfig
+        self.current_planner_hconfig = None
+        self.planner_progress_cache = None
 
         # Restore defaults between each run
         # Ex: if HDR doesn't clean up simplifies things
@@ -1420,17 +1451,17 @@ class ImagingTaskWidget(AWidget):
         if result["result"] == "ok":
             self.ac.stitchingTab.scan_completed(last_scan_config, result)
 
-        callback = last_scan_config.get("callback")
+        callback = last_scan_config.get("callback_done")
         if callback:
-            callback(result)
+            callback(result=result)
 
         run_next = result["result"] == "ok" or (
             not self.ac.batchTab.abort_on_failure())
         # More scans?
-        if run_next and self.scan_configs and not result.get("hard_fail"):
+        if run_next and self.planner_hconfigs and not result.get("hard_fail"):
             self.run_next_scan_config()
         else:
-            self.scan_configs = None
+            self.planner_hconfigs = None
             self.restore_properties = None
             self.setControlsEnabled(True)
             self.ac.motion_thread.jog_enable(True)
@@ -1441,19 +1472,19 @@ class ImagingTaskWidget(AWidget):
         try:
             self.ac.motion_thread.jog_enable(False)
             # self.ac.joystick_disable()
-            self.current_scan_config = self.scan_configs[0]
-            assert self.current_scan_config
-            del self.scan_configs[0]
+            self.current_planner_hconfig = self.planner_hconfigs[0]
+            assert self.current_planner_hconfig
+            del self.planner_hconfigs[0]
 
             dry = self.dry()
-            self.current_scan_config["dry"] = dry
+            self.current_planner_hconfig["dry"] = dry
 
-            out_dir_config = self.current_scan_config["out_dir_config"]
+            out_dir_config = self.current_planner_hconfig["out_dir_config"]
             out_dir = out_dir_config_to_dir(
                 out_dir_config,
                 self.ac.usc.app("argus").scan_dir())
-            self.current_scan_config["out_dir"] = out_dir
-            pconfig = self.current_scan_config["pconfig"]
+            self.current_planner_hconfig["out_dir"] = out_dir
+            pconfig = self.current_planner_hconfig["pconfig"]
 
             if os.path.exists(out_dir):
                 self.ac.log("Run aborted: directory already exists")
@@ -1520,11 +1551,16 @@ class ImagingTaskWidget(AWidget):
             self.plannerDone({"result": "init_failure", "hard_fail": True})
             raise
 
-    def go_scan_configs(self, scan_configs):
-        if not scan_configs:
+    def go_planner_hconfigs(self, scan_hconfigs):
+        """
+        scan_config["pconfig"]: planner config
+        scan_config["done_callback"]: callback
+        scan_config["out_dir_config"] out_dir_config
+        """
+        if not scan_hconfigs:
             return
 
-        self.scan_configs = list(scan_configs)
+        self.planner_hconfigs = list(scan_hconfigs)
         if not self.ac.is_idle():
             return
 
@@ -1654,6 +1690,7 @@ class ImagingTaskWidget(AWidget):
         # self.ac.log('Requesting snapshot')
         # Disable until snapshot is completed
         self.snapshot_pb.setEnabled(False)
+        self.taking_snapshot = True
 
         def emitSnapshotCaptured(image_id):
             # self.ac.microscope.log('Image captured: %s' % image_id)
@@ -1711,6 +1748,9 @@ class ImagingTaskWidget(AWidget):
         if imaging_config.get("add_scalebar", False):
             plugins["annotate-scalebar"] = {}
         options["plugins"] = plugins
+        qr_regex = config.bc.qr_regex()
+        if qr_regex:
+            options["qr_regex"] = qr_regex
 
         def callback(command, args, ret_e):
             if type(ret_e) is Exception:
@@ -1722,6 +1762,7 @@ class ImagingTaskWidget(AWidget):
         self.ac.image_processing_thread.process_image(options=options,
                                                       callback=callback)
         self.snapshot_pb.setEnabled(True)
+        self.taking_snapshot = False
 
     def _post_ui_init(self):
         self.update_save_extension()
@@ -1825,7 +1866,8 @@ class MainTab(ArgusTab):
             aname="imaging",
             parent=self)
 
-        self.log("pyuscope starting")
+        version = uscope_version.get_meta()["description"]
+        self.log(f"pyuscope starting (version {version})")
         self.log("https://github.com/Labsmore/pyuscope/")
         self.log("For enquiries contact support@labsmore.com")
         self.log("")
@@ -1909,24 +1951,25 @@ class MainTab(ArgusTab):
     def clear_log(self):
         self.log_widget.clear()
 
-    def go_current_pconfig(self, callback=None):
-        scan_config = self.active_planner_widget().get_current_scan_config()
-        if scan_config is None:
+    def go_current_pconfig(self, callback_done=None):
+        planner_hconfig = self.active_planner_widget(
+        ).get_current_planner_hconfig()
+        if planner_hconfig is None:
             self.ac.log("Failed to get scan config :(")
             return
         # Leave image controls at current value when not batching?
         # Should be a nop but better to just leave alone
-        del scan_config["pconfig"]["imager"]["properties"]
-        if callback:
-            scan_config["callback"] = callback
-        self.imaging_widget.go_scan_configs([scan_config])
+        del planner_hconfig["pconfig"]["imager"]["properties"]
+        if callback_done:
+            planner_hconfig["callback_done"] = callback_done
+        self.imaging_widget.go_planner_hconfigs([planner_hconfig])
 
-    def emit_go_current_pconfig(self, callback=None):
-        self.go_current_pconfig_signal.emit((callback, ))
+    def emit_go_current_pconfig(self, callback_done=None):
+        self.go_current_pconfig_signal.emit((callback_done, ))
 
     def go_current_pconfig_slot(self, args):
-        callback, = args
-        self.go_current_pconfig(callback=callback)
+        callback_done, = args
+        self.go_current_pconfig(callback_done=callback_done)
 
     def setControlsEnabled(self, yes):
         self.imaging_widget.snapshot_pb.setEnabled(yes)

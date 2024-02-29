@@ -1,16 +1,11 @@
-from uscope.config import PC
 from uscope.app.argus.threads import StitcherThread
-from uscope.planner.planner_util import microscope_to_planner_config
 from uscope import config
 from uscope.util import readj, writej
-import json
-import json5
 from collections import OrderedDict
 from uscope.cloud_stitch import CSInfo
 from uscope.imager.autofocus import AutoStacker
-import traceback
 from uscope.gui.common import ArgusShutdown
-import copy
+from uscope.imager.imager_util import format_mm_3dec
 
 from PyQt5 import Qt
 from PyQt5.QtGui import *
@@ -22,6 +17,10 @@ import datetime
 import os.path
 import math
 from enum import Enum
+import copy
+import traceback
+import json
+import json5
 """
 Argus Widget
 """
@@ -101,6 +100,18 @@ class AMainWindow(QMainWindow):
     def _cache_save(self, cachej):
         pass
 
+    def _cache_sn_save(self, cachej):
+        pass
+
+    def cache_get_set_sn_entry(self, cachej):
+        ret = cachej.setdefault("microscopes", {}).setdefault(
+            self.ac.microscope.model_serial_string(), {})
+        if "model" not in ret:
+            ret["model"] = self.ac.microscope.model()
+        if "serial" not in ret:
+            ret["serial"] = self.ac.microscope.serial()
+        return ret
+
     def cache_save(self):
         """
         Called when saving GUI state to file
@@ -112,10 +123,20 @@ class AMainWindow(QMainWindow):
         # otherwise we can loose some config
         # ex: carry over joystick config when not plugged in
         cachej = self.cachej
+
+        # Full structure
         self.ac.microscope.cache_save(cachej)
         self._cache_save(cachej)
         for awidget in self.awidgets.values():
             awidget.cache_save(cachej)
+
+        # S/N specific
+        cachej_sn = self.cache_get_set_sn_entry(cachej)
+        self.ac.microscope.cache_sn_save(cachej_sn)
+        self._cache_sn_save(cachej_sn)
+        for awidget in self.awidgets.values():
+            awidget.cache_sn_save(cachej_sn)
+
         fn = self.ac.aconfig.cache_fn()
         # file getting corrupted on save
         # https://github.com/Labsmore/pyuscope/issues/366
@@ -132,6 +153,9 @@ class AMainWindow(QMainWindow):
     def _cache_load(self, cachej):
         pass
 
+    def _cache_sn_load(self, cachej):
+        pass
+
     def cache_load(self):
         """
         Called when loading GUI state from file
@@ -145,10 +169,20 @@ class AMainWindow(QMainWindow):
                     cachej = json5.load(f)
             except Exception as e:
                 print("Invalid configuration cache. Ignoring", e)
+
+        # Full
         self.ac.microscope.cache_load(cachej)
         self._cache_load(cachej)
         for awidget in self.awidgets.values():
             awidget.cache_load(cachej)
+
+        # S/N specific
+        cachej_sn = self.cache_get_set_sn_entry(cachej)
+        self.ac.microscope.cache_sn_load(cachej_sn)
+        self._cache_sn_load(cachej_sn)
+        for awidget in self.awidgets.values():
+            awidget.cache_sn_load(cachej_sn)
+
         self.cachej = cachej
 
     def _poll_misc(self):
@@ -272,6 +306,30 @@ class AWidget(QWidget):
         self._cache_load(cachej)
         for awidget in self.awidgets.values():
             awidget.cache_load(cachej)
+
+    def _cache_sn_save(self, cachej):
+        pass
+
+    def cache_sn_save(self, cachej):
+        """
+        Called when saving GUI state to file
+        Add your state to JSON object j
+        """
+        self._cache_sn_save(cachej)
+        for awidget in self.awidgets.values():
+            awidget.cache_sn_save(cachej)
+
+    def _cache_sn_load(self, cachej):
+        pass
+
+    def cache_sn_load(self, cachej):
+        """
+        Called when loading GUI state from file
+        Read your state from JSON object j
+        """
+        self._cache_sn_load(cachej)
+        for awidget in self.awidgets.values():
+            awidget.cache_sn_load(cachej)
 
     def _poll_misc(self):
         pass
@@ -531,7 +589,7 @@ class BatchImageTab(ArgusTab):
         if ret != QMessageBox.Yes:
             return
 
-        self.ac.mainTab.imaging_widget.go_scan_configs(self.scan_configs)
+        self.ac.mainTab.imaging_widget.go_planner_hconfigs(self.scan_configs)
 
     def load_pb_clicked(self):
         directory = self.ac.bc.batch_data_dir()
@@ -794,6 +852,7 @@ class AdvancedTab(ArgusTab):
         def setup_die_step(distance_mult, step_mult):
             stacker = AutoStacker(microscope=self.ac.microscope)
             objective_config = self.ac.objective_config()
+            assert objective_config
             params = stacker.calc_die_parameters(objective_config,
                                                  distance_mult, step_mult)
             self.stacker_distance_le.setText("%0.6f" % params["pm_distance"])
@@ -1404,7 +1463,7 @@ class TopWidget(AWidget):
         self.ac.image_processing_thread.auto_focus(self.ac.objective_config())
 
     def _poll_misc(self):
-        last_pos = self.ac.motion_thread.pos_cache
+        last_pos = self.ac.motion_thread.get_pos_cache()
         if last_pos is not None:
             self.update_pos(last_pos)
 
@@ -1535,9 +1594,10 @@ class AnnotateImage(QLabel):
             else:
                 # Move right
                 dx += 10
+            distance_um = self.pixel_conversion * distance
+            text = format_mm_3dec(distance_um / 1000)
             qp.drawText((start.x() + end.x()) // 2 + dx,
-                        (start.y() + end.y()) // 2 + dy,
-                        "%0.2f µm" % (self.pixel_conversion * distance, ))
+                        (start.y() + end.y()) // 2 + dy, text)
 
         selected_color = QColor(43, 250, 43, 200)
         default_color = QColor(43, 43, 43, 200)

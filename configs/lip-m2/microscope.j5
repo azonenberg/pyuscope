@@ -33,6 +33,8 @@ A minimal configuration to do basic testing
         "grbl": {
             "rc_pre_home": [
                 //$100, $101 and $102 – [X,Y,Z] steps/mm
+                //Z is actually 5x this but we'll loose precision if here
+                //so instead apply that reduction host side
                 //"$100=800.000", "$101=800.000", "$102=800.000",
                 //Eliminate rounding errors => 8/5 adjustment
                 //However we need to basically rescale everything now
@@ -44,7 +46,7 @@ A minimal configuration to do basic testing
                 //"$110=1200.000", "$111=1200.000", "$112=1200.000",
                 //"$110=600.000", "$111=600.000", "$112=600.000",
                 //8/5 adjustment
-                "$110=960.000", "$111=960.000", "$112=960.000",
+                "$110=960.000", "$111=960.000", "$112=1920.000",
                 //$120, $121, $122 – [X,Y,Z] Acceleration, mm/sec^2
                 //Default values, didn't try changing
                 //"$120=30.000", "$121=30.000", "$122=30.000",
@@ -53,7 +55,9 @@ A minimal configuration to do basic testing
 
                 //max travel
                 //"$130=300.000", "$131=200.000", "$132=60.000",
-                "$130=480.000", "$131=320.000", "$132=96.000",
+                //"$130=480.000", "$131=320.000", "$132=96.000",
+                //z axis gearbox + 0.9 motor
+                "$130=480.000", "$131=320.000", "$132=960.000",
 
                 //Homing adjustments to account for gearbox etc
                 //"$24=25.0","$25=500.000",
@@ -69,7 +73,7 @@ A minimal configuration to do basic testing
                 //z: 24 / (8/5 * 10) => 1.5 mm
                 //z:  48 => 3.0 mm
                 //2023-10-12: had increased this to be within soft limits, but it makes it take a really long time to home
-                "$27=5.000",
+                "$27=48.000",
             ],
             "rc_post_home": [
                 /*
@@ -85,7 +89,9 @@ A minimal configuration to do basic testing
                 //More proper homed scheme
                 //"G10 L2 P1 X-297.000 Y-197.000 Z-3.000",
                 //8/5 adjustment
-                "G10 L2 P1 X-475.200 Y-315.200 Z-4.800",
+                //"G10 L2 P1 X-475.200 Y-315.200 Z-4.800",
+                //gearbox + 0.9 motor
+                "G10 L2 P1 X-475.200 Y-315.200 Z-48.000",
                 "G10 L2 P2 X0 Y0 Z0",
 
                 //Select WCS2
@@ -95,7 +101,7 @@ A minimal configuration to do basic testing
         "scalars": {
             "x": 1.6,
             "y": 1.6,
-            "z": 1.6,
+            "z": 16.0,
         },
         /*
         Actual limits should be:
@@ -135,91 +141,39 @@ A minimal configuration to do basic testing
         },
         //2023-11-16: is this actually needed?
         "scalar": 0.5,
-        //Make image square for even artifacts
-        //200: not aggressive enough
-        //300: slight artifacts at edges
-        //400: looks ok. Final: 1424 x 1424
+        //400 looked ok
+        //0 shows corners (cemented field stop...)
+        //200 might be good estimate
         "crop_pixels": {
-            "top": 400,
-            "bottom": 400,
-            "left": 1296,
-            "right": 1296,
+            "top": 200,
+            "bottom": 200,
+            "left": 1096,
+            "right": 1096,
         },
     },
+
     "optics": {
-        /*
-        2023-11-16
-        12.4 mm at 1x
-        1424 square (cropped) w/ 0.5x shrink
-        actual view: 2848 pixels
-        12400 / 2848 = 
-        */
-        "um_per_pixel_raw_1x": 4.353932584,
-    },
-    "ipp": {
-        "plugins": {
-            "stack-enfuse": {
-                "align_xy": false,
-                "align_zoom": true,
-            },
-        },
+        "um_per_pixel_raw_1x": 2.3364486,
+        "infinity_tube_length": 200,
     },
 
     "systems": [
         //Default configuration
         {
             "camera_sn": null,
-            "objectives": [
-                //NOTE: these NA values are not calibrated
-                //TODO: how to extract from f?
-                //how does f relate to relay lenses?
-                //2023-11-15: half values to give better AF range
-                {
-                    "magnification": 0.7,
-                    "na": 0.00875,
-                    "name": "0.7X",
-                },
-                {
-                    "magnification": 1.0,
-                    "na": 0.0125,
-                    "name": "1.0X",
-                },
-                {
-                    "magnification": 1.5,
-                    "na": 0.02,
-                    "name": "1.5X",
-                },
-                {
-                    "magnification": 2.0,
-                    "na": 0.0275,
-                    "name": "2.0X",
-                },
-                {
-                    "magnification": 2.5,
-                    "na": 0.034375,
-                    "name": "2.5X",
-                },
-                {
-                    "magnification": 3.0,
-                    "na": 0.04125,
-                    "name": "3.0X",
-                },
-                {
-                    "magnification": 3.5,
-                    "na": 0.048125,
-                    "name": "3.5X",
-                },
-                {
-                    "magnification": 4.0,
-                    "na": 0.055,
-                    "name": "4.0X",
-                },
-                {
-                    "magnification": 4.5,
-                    "na": 0.061875,
-                    "name": "4.5X",
-                },
+            "objectives_db": [
+                "vendor: Mitutoyo, model: 58-235, magnification: 1, na: 0.025",
+                "vendor: Mitutoyo, model: 46-142, magnification: 2, na: 0.055",
+                "vendor: Mitutoyo, model: 46-143, magnification: 5, na: 0.14",
+                "vendor: Mitutoyo, model: 46-144, magnification: 10, na: 0.28",
+                "vendor: Mitutoyo, model: 46-145, magnification: 20, na: 0.42",
+                "vendor: Mitutoyo, model: 46-147, magnification: 100, na: 0.70",
+                "vendor: Nikon, model: CF Plan 10X",
+                "vendor: Nikon, model: CF Plan 20X",
+                "vendor: Nikon, model: CF Plan 50X",
+                "vendor: Nikon, model: CF Plan 100X",
+                "vendor: Nikon, model: VC 60X",
             ],
         },
-    ],
+   ],
 }

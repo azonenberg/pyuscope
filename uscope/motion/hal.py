@@ -607,23 +607,23 @@ class MotionHAL:
         self.home_progress = self.default_home_progress
 
         self.check_threads = self.microscope.bc.check_threads()
-        self.motion_thread = None
+        self.check_thread_id = None
         if self.check_threads:
             print(f"Motion {self} ({type(self)}): checking threads requested")
 
     def __del__(self):
         self.close()
 
-    def updte_motion_thread(self):
-        self.motion_thread = threading.get_ident()
+    def update_check_thread(self):
+        self.check_thread_id = threading.get_ident()
         if self.check_threads:
             print(
-                f"Motion {self} ({type(self)}): checking threads enabled with {self.motion_thread}"
+                f"Motion {self} ({type(self)}): checking threads enabled with {self.check_thread_id}"
             )
 
     def check_thread_safety(self):
-        if self.check_threads and self.motion_thread:
-            assert self.motion_thread == threading.get_ident(), (
+        if self.check_threads and self.check_thread_id:
+            assert self.check_thread_id == threading.get_ident(), (
                 "GUI thread unsafe access detected", self.main_thread,
                 threading.get_ident())
 
@@ -1285,6 +1285,14 @@ class MotionHAL:
         self.jog_estimated_end = None
         self.last_jog_time = None
 
+    def idle(self):
+        """
+        Return true of a jog or other movement has not yet completed
+        XXX: currently JogController makes sure a cancel is sent
+        But jog might actually finish before
+        """
+        return self.last_jog_time is not None
+
     def on(self):
         '''Call at start of MDI phase, before planner starts'''
         pass
@@ -1348,6 +1356,9 @@ class MotionHAL:
     def _apply_damper(self, damper):
         raise NotSupported("")
 
+    def system_status_ts(self, root_status, status):
+        pass
+
 
 '''
 Has no actual hardware associated with it
@@ -1380,31 +1391,28 @@ class MockHal(MotionHAL):
         for axis in self._axes:
             self._pos_cache[axis] = 0.0
 
-    def take_picture(self, file_name):
-        self._log('taking picture to %s' % file_name)
-
     def _move_absolute(self, pos):
         for axis, apos in pos.items():
             self._pos_cache[axis] = apos
         0 and self._log('absolute move to ' + pos_str(pos))
+        self.update_status({"pos": self._pos_cache})
 
     def _move_relative(self, delta):
         for axis, adelta in delta.items():
             self._pos_cache[axis] += adelta
         0 and self._log('relative move to ' + pos_str(delta))
+        self.update_status({"pos": self._pos_cache})
 
     def _jog(self, axes, rate):
         for axis, adelta in axes.items():
             self._pos_cache[axis] += adelta
+        self.update_status({"pos": self._pos_cache})
 
     def _pos(self):
         return self._pos_cache
 
     def settle(self):
         # No hardware to let settle
-        pass
-
-    def ar_stop(self):
         pass
 
     def log_info(self):
@@ -1452,9 +1460,6 @@ class DryHal(MotionHAL):
         for axis in self._axes:
             self._posd[axis] = 0.0
 
-    def take_picture(self, file_name):
-        self._log('taking picture to %s' % file_name)
-
     def _move_absolute(self, pos):
         for axis, apos in pos.items():
             self._posd[axis] = apos
@@ -1474,9 +1479,6 @@ class DryHal(MotionHAL):
 
     def settle(self):
         # No hardware to let settle
-        pass
-
-    def ar_stop(self):
         pass
 
     def _get_max_velocities(self):
