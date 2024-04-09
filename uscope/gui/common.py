@@ -3,7 +3,7 @@ from uscope.gui.control_scrolls import get_control_scroll
 from uscope.config import get_usc, get_bc
 from uscope.gui import imager
 from uscope.gst_util import Gst, CaptureSink
-from uscope.app.argus.threads import QMotionThread, QImageProcessingThread, QJoystickThread, QTaskThread
+from uscope.app.argus.threads import QMotionThread, QImageProcessingThread, QJoystickThread, QTaskThread, QImagerControlThread
 from uscope.joystick import JoystickNotFound
 from uscope.microscope import Microscope
 from uscope.kinematics import Kinematics
@@ -189,6 +189,7 @@ class ArgusCommon(QObject):
         self.joystick_thread = None
         self.image_processing_thread = None
         self.task_thread = None
+        self.imager_control_thread = None
 
         self.bc = get_bc()
         self.check_threads = self.bc.check_threads()
@@ -234,7 +235,8 @@ class ArgusCommon(QObject):
         # TODO: some pipelines output jpeg directly
         # May need to tweak this
         cropped_width, cropped_height = self.usc.imager.cropped_wh()
-        self.capture_sink = CaptureSink(width=cropped_width,
+        self.capture_sink = CaptureSink(ac=self,
+                                        width=cropped_width,
                                         height=cropped_height,
                                         source_type=self.vidpip.source_name)
         assert self.capture_sink
@@ -272,6 +274,7 @@ class ArgusCommon(QObject):
         self.microscope.joystick_thread = self.joystick_thread
 
         self.task_thread = QTaskThread(ac=self)
+        self.imager_control_thread = QImagerControlThread(ac=self)
 
     def initUI(self):
         self.vidpip.setupWidgets()
@@ -341,6 +344,7 @@ class ArgusCommon(QObject):
         self.image_processing_thread = QImageProcessingThread(ac=self)
 
         self.task_thread.start()
+        self.imager_control_thread.start()
 
         self.kinematics = Kinematics(
             microscope=self.microscope,
@@ -371,17 +375,19 @@ class ArgusCommon(QObject):
         if self.microscope.bc.stress_test():
             self.log("WARNING: stress test enabled")
 
-    def shutdown_request(self):
+    def shutdown_request(self, phase):
         if self.motion_thread:
-            self.motion_thread.shutdown_request()
+            self.motion_thread.shutdown_request(phase)
         if self.planner_thread:
-            self.planner_thread.shutdown_request()
+            self.planner_thread.shutdown_request(phase)
         if self.image_processing_thread:
-            self.image_processing_thread.shutdown_request()
+            self.image_processing_thread.shutdown_request(phase)
         if self.joystick_thread:
-            self.joystick_thread.shutdown_request()
+            self.joystick_thread.shutdown_request(phase)
         if self.task_thread:
-            self.task_thread.shutdown_request()
+            self.task_thread.shutdown_request(phase)
+        if self.imager_control_thread:
+            self.imager_control_thread.shutdown_request(phase)
 
     def shutdown_join(self):
         if self.motion_thread:
@@ -400,6 +406,8 @@ class ArgusCommon(QObject):
         if self.task_thread:
             self.task_thread.shutdown_join()
             # self.task_thread = None
+        if self.imager_control_thread:
+            self.imager_control_thread.shutdown_join()
 
     def check_thread_safety(self):
         if self.check_threads:
@@ -425,7 +433,7 @@ class ArgusCommon(QObject):
         self.log('Loading imager %s...' % source)
         # Gst is pretty ingrained for the GUI
         #
-        self.imager = imager.get_gui_imager(source, self)
+        self.imager = self.vidpip.imager_aplugin.get_imager()
         # gst pipeline already created / should be ready to go
         self.imager.device_restarted()
 

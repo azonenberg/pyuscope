@@ -4,6 +4,7 @@ from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 
 import os
+import piexif
 
 from collections import OrderedDict
 """
@@ -230,6 +231,10 @@ class ImagerControlScroll(QScrollArea):
         self.raw_cache = {}
         self.disp_cache = {}
         self.setDispProperties.connect(self.set_disp_properties)
+        self.virtual_properties = {}
+
+    def add_virtual_property(self, vp):
+        self.virtual_properties[vp.name] = vp
 
     def post_imager_ready(self):
         """
@@ -385,10 +390,15 @@ class ImagerControlScroll(QScrollArea):
             # If GUI driven it will trigger the prop write
             # Otherwise update for quicker response and in case read back fails
             element.disp_property_set_widgets(val)
+        self.ac.microscope.imager.properties_changed()
 
     def get_disp_properties_ts(self):
         # should force an update?
         return dict(self.disp_cache)
+
+    def get_disp_property_ts(self, k):
+        # should force an update?
+        return self.disp_cache[k]
 
     def set_disp_properties_ts(self, vals):
         # return dict(self.disp_cache)
@@ -472,7 +482,7 @@ class ImagerControlScroll(QScrollArea):
         Write a property as the raw name
         """
         self.verbose and print(f"raw_prop_write() {name} = {value}")
-        self._raw_prop_write(name, value)
+        self._rawvirt_prop_write(name, value)
         self.raw_prop_written(name, value)
         self.raw_cache[name] = value
 
@@ -480,7 +490,7 @@ class ImagerControlScroll(QScrollArea):
         """
         Read a property as the raw name
         """
-        ret = self._raw_prop_read(name)
+        ret = self._rawvirt_prop_read(name)
         self.verbose and print(f"raw_prop_read() {name} = {ret}")
         self.raw_prop_was_read(name, ret)
         self.raw_cache[name] = ret
@@ -499,6 +509,18 @@ class ImagerControlScroll(QScrollArea):
         In practice this means read a gstreamer property
         """
         raise Exception("Required")
+
+    def _rawvirt_prop_write(self, name, val):
+        if name in self.virtual_properties:
+            self.virtual_properties[name].write(val)
+        else:
+            self._raw_prop_write(name, val)
+
+    def _rawvirt_prop_read(self, name):
+        if name in self.virtual_properties:
+            return self.virtual_properties[name].read()
+        else:
+            return self._raw_prop_read(name)
 
     def disp_prop_read(self, disp_name):
         element = self.disp2element[disp_name]
@@ -540,6 +562,18 @@ class ImagerControlScroll(QScrollArea):
 
     def auto_color_enabled(self):
         raise Exception("Required")
+
+    def set_exposure(self, n):
+        assert 0, "Required"
+
+    def get_exposure(self):
+        assert 0, "Required"
+
+    def get_auto_exposure_disp_property(self):
+        assert 0, "Required"
+
+    def get_exposure_disp_property(self):
+        assert 0, "Required"
 
     def cal_load(self, load_data_dir=True):
         try:
@@ -617,6 +651,49 @@ class ImagerControlScroll(QScrollArea):
     def is_disp_prop_optional(self, disp_prop):
         return disp_prop in self.optional_disp_props
 
+    def get_meta_exposure_seconds(self, meta):
+        """
+        FIXME: adjust this for toupcamsrc and v4l2src
+        I think both report in us though?
+        """
+        return meta["disp_properties"][self.get_exposure_disp_property()] / 1e6
+
+    def captured_image_exposure(self, captured_image):
+        return captured_image.meta["disp_properties"][
+            self.get_exposure_disp_property()]
+
+    def add_captured_image_meta(self, captured_image):
+        # Used for auto exposure control loop
+        #exposure = captured_image.meta["disp_properties"][self.get_exposure_disp_property()]
+        #captured_image.meta["exposure"] = exposure
+        # Used for saving image
+        self.prepare_exif_bytes(captured_image)
+
+    def prepare_exif_bytes(self, captured_image):
+        """
+        Thread safe
+        Called from image processing thread
+        """
+        exif = {}
+        # exif["Exif"] = {33434: (16660, 1000000)}
+        # XXX: are there defines we can use instead of hard coding constants?
+        exposure_seconds = self.get_meta_exposure_seconds(captured_image.meta)
+        exp_tuple = (int(exposure_seconds * 1e6), int(1e6))
+        exif["Exif"] = {
+            # manual exposure
+            34850: 1,
+            # exposure time as rational
+            33434: exp_tuple,
+            # ISO
+            #34855: 118,
+            34855: 1,
+            # f number
+            #33437: 2.2,
+            # 33437: (22, 100),
+            33437: (1, 1),
+        }
+        captured_image.set_exif_bytes(piexif.dump(exif))
+
 
 """
 Had these in the class but really fragile pre-init
@@ -633,45 +710,49 @@ def template_property(vidpip, ac, prop_entry):
     else:
         assert 0, type(prop_entry)
 
-    ps = vidpip.source.find_property(prop_name)
+    if defaults.get("virtual"):
+        return defaults
+
     ret = {}
+    ps = vidpip.source.find_property(prop_name)
     ret["prop_name"] = prop_name
     ret["default"] = ps.default_value
 
-    if ps.value_type.name == "gint":
+    if defaults.get("fill_type", True):
+        if ps.value_type.name == "gint":
 
-        def override(which, default):
-            if not ac:
-                return default
-            """
-            Ex:
-            prop_name: expotime
-            which: max
+            def override(which, default):
+                if not ac:
+                    return default
+                """
+                Ex:
+                prop_name: expotime
+                which: max
 
-            "source_properties_mod": {
-                //In us. Can go up to 15 sec which is impractical for typical usage
-                "expotime": {
-                    "max": 200000
+                "source_properties_mod": {
+                    //In us. Can go up to 15 sec which is impractical for typical usage
+                    "expotime": {
+                        "max": 200000
+                    },
                 },
-            },
-            """
-            spm = ac.microscope.usc.imager.source_properties_mod()
-            if not spm:
-                return default
-            pconfig = spm.get(prop_name)
-            if not pconfig:
-                return default
-            return pconfig.get(which, default)
+                """
+                spm = ac.microscope.usc.imager.source_properties_mod()
+                if not spm:
+                    return default
+                pconfig = spm.get(prop_name)
+                if not pconfig:
+                    return default
+                return pconfig.get(which, default)
 
-        minimum = override("min", ps.minimum)
-        maximum = override("max", ps.maximum)
-        ret["min"] = minimum
-        ret["max"] = maximum
-        ret["type"] = "int"
-    elif ps.value_type.name == "gboolean":
-        ret["type"] = "bool"
-    else:
-        assert 0, ps.value_type.name
+            minimum = override("min", ps.minimum)
+            maximum = override("max", ps.maximum)
+            ret["min"] = minimum
+            ret["max"] = maximum
+            ret["type"] = "int"
+        elif ps.value_type.name == "gboolean":
+            ret["type"] = "bool"
+        else:
+            assert 0, ps.value_type.name
 
     ret.update(defaults)
     return ret
@@ -716,6 +797,47 @@ class MockControlScroll(ImagerControlScroll):
         return False
 
 
+class VirtualProperty:
+    def __init__(self, name=None, value=None, ac=None):
+        self.name = name
+        self.value = value
+        self.ac = ac
+
+    def read(self):
+        return self.value
+
+    def write(self, value):
+        self.value = value
+
+
+class AutoExposureSoftwareVP(VirtualProperty):
+    def read(self):
+        return self.ac.imager_control_thread.auto_exposure()
+
+    def write(self, value):
+        return self.ac.imager_control_thread.set_auto_exposure(value)
+
+
+class AutoExposureSoftwareTargetVP(VirtualProperty):
+    def read(self):
+        return self.ac.imager_control_thread.auto_exposure_target100()
+
+    def write(self, value):
+        return self.ac.imager_control_thread.set_auto_exposure_target100(value)
+
+
+class WhiteBalanceSoftwareVP(VirtualProperty):
+    def __init__(self, channel=None, **kwargs):
+        super().__init__(**kwargs)
+        self.channel = channel
+
+    def read(self):
+        return self.ac.imager_control_thread.auto_exposure_target100()
+
+    def write(self, value):
+        return self.ac.imager_control_thread.set_auto_exposure_target100(value)
+
+
 class GstControlScroll(ImagerControlScroll):
     """
     Display a number of gst-toupcamsrc based controls and supply knobs to tweak them
@@ -737,12 +859,10 @@ class GstControlScroll(ImagerControlScroll):
         pass
 
     def _raw_prop_write(self, name, val):
-        source = self.vidpip.source
-        source.set_property(name, val)
+        self.vidpip.source.set_property(name, val)
 
     def _raw_prop_read(self, name):
-        source = self.vidpip.source
-        return source.get_property(name)
+        return self.vidpip.source.get_property(name)
 
     """
     def raw_prop_default(self, name):

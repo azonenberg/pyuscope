@@ -125,6 +125,58 @@ class HDREnfusePlugin(IPPlugin):
 
 
 """
+luminance-hdr-cli -o lum.jpg -e '-2,0,+2' c005_r006_h00.jpg c005_r006_h01.jpg c005_r006_h02.jpg
+
+The minimum EXIF tags for automated EV is something like:
+-33434 (exposure time)
+-34855 (ISO)
+-33437 (f number)
+
+luminance-hdr-cli --tmo ferradans --tmoFerRho 1.0 --tmoFerInvAlpha 0.5 -o out/out4.jpg *.jpg
+"""
+
+
+class HDRLuminancePlugin(IPPlugin):
+    def __init__(self, log, default_options={}, microscope=None):
+        super().__init__(log=log,
+                         microscope=microscope,
+                         default_options=default_options,
+                         need_tmp_dir=True)
+
+    def _run(self, data_in, data_out, options={}):
+        out_fn = data_out["image"].get_filename()
+        args = [
+            "luminance-hdr-cli",
+            "--tmo",
+            "ferradans",
+            "--tmoFerRho",
+            "1.0",
+            "--tmoFerInvAlpha",
+            "0.5",
+            "-o",
+            out_fn,
+        ]
+        fns_in = [image_in.get_filename() for image_in in data_in["images"]]
+        for fn in sorted(fns_in):
+            args.append(fn)
+        self.log(" ".join(args))
+        p = subprocess.Popen(args,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        output, error = p.communicate()
+        if p.returncode != 0:
+            print("")
+            print("")
+            print("")
+            print("Subprocess error :(")
+            print(f"{args}")
+            print(f"{output}")
+            print(f"{error}")
+            raise subprocess.SubprocessError(
+                f"luminance-hdr-cli failed w/ code {p.returncode}")
+
+
+"""
 Stack using enfuse
 Currently skips align
 """
@@ -195,7 +247,7 @@ class StackEnfusePlugin(IPPlugin):
                 "-v", "--use-given-order", "-a",
                 os.path.join(self.get_tmp_dir(), prefix)
             ]
-            for image_in in data_in["images"]:
+            for image_in in sorted(data_in["images"]):
                 args.append(image_in.get_filename())
             # self.log(" ".join(args))
             check_call(args)
@@ -214,7 +266,8 @@ class StackEnfusePlugin(IPPlugin):
         if 0 and ".tif" in out_fn:
             args.append("-d")
             args.append("16")
-        for fn in glob.glob(os.path.join(self.get_tmp_dir(), prefix + "*")):
+        for fn in sorted(
+                glob.glob(os.path.join(self.get_tmp_dir(), prefix + "*"))):
             args.append(fn)
         # self.log(" ".join(args))
         check_call(args)
@@ -238,17 +291,23 @@ class StabilizationPlugin(IPPlugin):
         # https://stackoverflow.com/questions/34865765/finding-the-median-of-a-set-of-pictures-using-pil-and-numpy-gives-a-black-and-wh
 
         images_np = []
+        exif = None
         for image_in in data_in["images"]:
             fn = image_in.get_filename()
-            image_matrix = np.array(Image.open(fn))
+            im = Image.open(fn)
+            image_matrix = np.array(im)
             images_np.append(image_matrix)
+            if exif is None:
+                exif = im.info.get('exif')
 
         image_stack = np.concatenate([im[..., None] for im in images_np],
                                      axis=3)
         median_array = np.median(image_stack, axis=3)
         median_array = median_array.astype(np.uint8)
         median_image = Image.fromarray(median_array)
-        median_image.save(data_out["image"].get_filename(), quality=90)
+        median_image.save(data_out["image"].get_filename(),
+                          quality=90,
+                          exif=exif)
 
 
 """
@@ -620,6 +679,7 @@ def get_plugin_ctors():
     return {
         "stack-enfuse": StackEnfusePlugin,
         "hdr-enfuse": HDREnfusePlugin,
+        "hdr-luminance": HDRLuminancePlugin,
         "stabilization": StabilizationPlugin,
         "correct-ff1": CorrectFF1Plugin,
         "correct-sharp1": CorrectSharp1Plugin,

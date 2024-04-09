@@ -10,21 +10,24 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst
 
 Gst.init(None)
-from gi.repository import GLib
+#from gi.repository import GLib
 
-from uscope.imager.imager import Imager
-from uscope.imager.config import default_gstimager_config
-from uscope.gst_util import CaptureSink
+#from uscope.imager.imager import Imager
+#from uscope.imager.config import default_gstimager_config
+#from uscope.gst_util import CaptureSink
 from uscope.util import add_bool_arg
 from uscope import config
-import threading
-import time
+#import threading
+#import time
 
 
 class ImageTimeout(Exception):
     pass
 
 
+# 2024-03-06
+# this is broken already, just comment out during Imager plugin refactor
+'''
 class GstCLIImager(Imager):
     """
     Stand alone imager that doesn't rely on GUI feed
@@ -235,6 +238,7 @@ class GstCLIImager(Imager):
 
         if len(errors):
             raise GstError(errors[0])
+'''
 
 
 def gst_add_args(parser):
@@ -366,6 +370,7 @@ class GstError(Exception):
     pass
 
 
+'''
 def apply_imager_cal(imager, verbose=False):
     usj_source = "gst-" + imager.source_name
     properties = config.cal_load(source=usj_source)
@@ -381,3 +386,4 @@ def get_cli_imager_by_config(usj=None, verbose=False, microscope=None):
     imager = GstCLIImager(opts=opts, microscope=microscope)
     apply_imager_cal(imager, verbose=verbose)
     return imager
+'''

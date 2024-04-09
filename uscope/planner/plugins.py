@@ -9,6 +9,7 @@ from uscope.motion.hal import pos_str
 from uscope.kinematics import Kinematics
 from scipy import polyfit
 from uscope.imager.autofocus import choose_best_image, Autofocus
+from enum import Enum
 
 
 class PlannerAxis:
@@ -384,7 +385,18 @@ class PointGenerator2P(PlannerPlugin):
     def calc_pos(self, ll_col, ll_row):
         return {"x": self.x.rc_pos(ll_col), "y": self.y.rc_pos(ll_row)}
 
-    def gen_pos_ll_ul_serp(self):
+    def gen_pos_ll_ul(self):
+        # 2024-03-27
+        # Should probably just drop the other algorithms at this point
+        # Every major system now uses this
+        if self.pc.motion_origin() == "ll":
+            for x in XYPosGenerator(rows=self.rows,
+                                    cols=self.cols,
+                                    calc_pos=self.calc_pos,
+                                    pc=self.pc).run():
+                yield x
+            return
+
         for ll_row in range(self.rows):
             for ll_col in range(self.cols):
                 if ll_row % 2 == 1:
@@ -449,7 +461,7 @@ class PointGenerator2P(PlannerPlugin):
 
     def iterate(self, state):
         # columns
-        for (pos, _ll, (ul_col, ul_row)) in self.gen_pos_ll_ul_serp():
+        for (pos, _ll, (ul_col, ul_row)) in self.gen_pos_ll_ul():
             self.itered_xy_points += 1
             self.log('')
             self.log(
@@ -486,7 +498,7 @@ class PointGenerator2P(PlannerPlugin):
 
     def gen_meta(self, meta):
         points = OrderedDict()
-        for (pos, _ll, (ul_col, ul_row)) in self.gen_pos_ll_ul_serp():
+        for (pos, _ll, (ul_col, ul_row)) in self.gen_pos_ll_ul():
             k = self.filename_part(ul_col, ul_row)
             v = dict(pos)
             v.update({"col": ul_col, "row": ul_row})
@@ -511,6 +523,57 @@ TODO: consider leaving Z along if all three points are the same or is omitted en
 """
 
 
+class XYPattern(Enum):
+    # For reach row:
+    # Start at left side and move right
+    # "left right"
+    XM_XP = "x-:x+"
+    # For reach row:
+    # Start at right side and move left
+    XP_XM = "x+:x-"
+    YM_YP = "y-:y+"
+    YP_YM = "y+:y-"
+
+
+class XYPosGenerator:
+    def __init__(self, rows, cols, calc_pos, pc):
+        assert pc.motion_origin() == "ll"
+        self.rows = rows
+        self.cols = cols
+        self.pattern = pc.xy_pattern()
+        # TODO: optimal pattern might depend more on backlash
+        # traditional value is XM_XP but with negative backlash correction XP_XM may be better
+        if self.pattern is None:
+            self.pattern = XYPattern.XM_XP
+        self.pattern = XYPattern(self.pattern)
+        self.serpentine = pc.xy_sepentine()
+        # Faster but less precise
+        if self.serpentine is None:
+            self.serpentine = True
+        print("XYPosGenerator", self.pattern, self.serpentine)
+        self.calc_pos = calc_pos
+
+    def run(self):
+        if self.pattern in (XYPattern.XM_XP, XYPattern.XP_XM):
+            for ll_row in range(self.rows):
+                for ll_col in range(self.cols):
+                    # Start at right instead of left?
+                    if self.pattern == XYPattern.XP_XM:
+                        ll_col = self.cols - 1 - ll_col
+                    if self.serpentine:
+                        if ll_row % 2 == 1:
+                            ll_col = self.cols - 1 - ll_col
+
+                    pos = self.calc_pos(ll_col, ll_row)
+                    ul_col = ll_col
+                    ul_row = self.rows - 1 - ll_row
+                    yield (pos, (ll_col, ll_row), (ul_col, ul_row))
+        elif self.pattern in (XYPattern.YM_YP, XYPattern.YP_YM):
+            assert 0, "FIXME"
+        else:
+            assert 0, self.pattern
+
+
 class PointGenerator3P(PlannerPlugin):
     def __init__(self, planner):
         super().__init__(planner=planner)
@@ -528,6 +591,7 @@ class PointGenerator3P(PlannerPlugin):
         self.calc_per_rc()
         self.itered_xy_points = 0
         assert self.pc.motion_origin() == "ll"
+        self.xy_pattern = self.pc.xy_pattern()
 
     def has_z(self, corners):
         ret = None
@@ -717,16 +781,12 @@ class PointGenerator3P(PlannerPlugin):
     def filename_part(self, ul_col, ul_row):
         return 'c%03u_r%03u' % (ul_col, ul_row)
 
-    def gen_pos_ll_ul_serp(self):
-        for ll_row in range(self.rows):
-            for ll_col in range(self.cols):
-                if ll_row % 2 == 1:
-                    ll_col = self.cols - 1 - ll_col
-
-                pos = self.calc_pos(ll_col, ll_row)
-                ul_col = ll_col
-                ul_row = self.rows - 1 - ll_row
-                yield (pos, (ll_col, ll_row), (ul_col, ul_row))
+    def gen_pos_ll_ul(self):
+        for x in XYPosGenerator(rows=self.rows,
+                                cols=self.cols,
+                                calc_pos=self.calc_pos,
+                                pc=self.pc).run():
+            yield x
 
     def move_absolute(self, pos):
         pos = dict(pos)
@@ -742,7 +802,7 @@ class PointGenerator3P(PlannerPlugin):
         self.motion.move_absolute(pos)
 
     def iterate(self, state):
-        for (pos, _ll, (ul_col, ul_row)) in self.gen_pos_ll_ul_serp():
+        for (pos, _ll, (ul_col, ul_row)) in self.gen_pos_ll_ul():
             self.log('')
             self.itered_xy_points += 1
             if "z" in pos and not self.tracking_z:
@@ -777,7 +837,7 @@ class PointGenerator3P(PlannerPlugin):
 
     def gen_meta(self, meta):
         points = OrderedDict()
-        for (pos, _ll, (ul_col, ul_row)) in self.gen_pos_ll_ul_serp():
+        for (pos, _ll, (ul_col, ul_row)) in self.gen_pos_ll_ul():
             k = self.filename_part(ul_col, ul_row)
             v = dict(pos)
             v.update({"col": ul_col, "row": ul_row})
@@ -1021,7 +1081,8 @@ class PlannerHDR(PlannerPlugin):
             self.log("HDR: setting %s" % (hdrv, ))
             if not self.dry:
                 self.imager.set_properties(hdrv)
-                self.sleep(self.tsettle)
+                if self.microscope.usc.kinematics.hdr_closed_loop():
+                    self.imager.wait_properties(hdrv)
             modifiers = {
                 "filename_part": "h%02u" % hdri,
             }
@@ -1117,6 +1178,7 @@ class PlannerCaptureImage(PlannerPlugin):
     def __init__(self, planner):
         super().__init__(planner=planner)
         self.images_captured = 0
+        self.get_mode = self.pc.j["imager"].get("get_mode", "processed")
 
     def scan_begin(self, state):
         properties = self.pc.j["imager"].get("properties")
@@ -1137,7 +1199,8 @@ class PlannerCaptureImage(PlannerPlugin):
                 self.planner.imager.take()
             else:
                 tstart = time.time()
-                im = self.planner.imager.get_processed()
+                capim = self.planner.imager.get_by_mode(mode=self.get_mode)
+                im = capim.image
                 tend = time.time()
                 self.verbose and self.log(
                     "FIXME TMP: actual capture took %0.3f" % (tend - tstart, ))
@@ -1152,6 +1215,8 @@ class PlannerCaptureImage(PlannerPlugin):
         self.images_captured += 1
         modifiers = {}
         replace_keys = {
+            "captured_image": capim,
+            # compatibility to ease transition
             "image": im,
             "images_captured": self.images_captured,
         }
@@ -1183,7 +1248,8 @@ class PlannerSaveImage(PlannerPlugin):
         self.log("Output extension: %s" % self.extension)
 
     def iterate(self, state):
-        im = state.get("image")
+        capim = state.get("captured_image")
+        im = capim.image
         if not self.planner.dry:
             assert im, "Asked to save image without image given"
 
@@ -1192,10 +1258,11 @@ class PlannerSaveImage(PlannerPlugin):
         fn_full = img_prefix + self.extension
         if not self.planner.dry:
             # PIL object
+            kwargs = {}
             if self.extension == ".jpg" or self.extension == ".jpeg":
-                im.save(fn_full, quality=self.quality)
-            else:
-                im.save(fn_full)
+                kwargs["quality"] = self.quality
+            # Includes EXIF
+            capim.save(fn_full, **kwargs)
             meta = {
                 "position": self.motion.pos(),
             }

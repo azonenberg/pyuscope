@@ -6,7 +6,8 @@ from uscope.imagep.thread import ImageProcessingThreadBase
 from uscope.planner.thread import PlannerThreadBase
 from uscope.motion.thread import MotionThreadBase
 from uscope.joystick_thread import JoystickThreadBase
-from uscope.threads import CommandThreadBase
+from uscope.imager.thread import ImagerControlThreadBase
+from uscope.threads import CommandThreadBase, ShutdownPhase
 from uscope.microscope import MicroscopeStop
 from PyQt5.QtCore import QThread, pyqtSignal
 import traceback
@@ -32,6 +33,10 @@ def dbg(*args):
 
 
 class ArgusThread(QThread):
+    #def __init__(self, ac=None, **kwargs):
+    #    QThread.__init__(**kwargs)
+    #    self.ac = ac
+
     def shutdown_join(self, timeout=3.0):
         # seconds = milliseconds
         self.wait(int(timeout * 1000))
@@ -102,12 +107,7 @@ class StitcherThread(CommandThreadBase, ArgusThread):
         self.log(f"Stitch CLI: finished job")
         print(f"Stitch CLI: finished job")
 
-    def imagep_add(
-        self,
-        directory,
-        cs_info=None,
-        ippj={},
-    ):
+    def imagep_add(self, directory, cs_info=None, ippj={}, block=False):
         j = {
             #"type": "imagep",
             "directory": directory,
@@ -115,7 +115,7 @@ class StitcherThread(CommandThreadBase, ArgusThread):
         }
         if cs_info is not None:
             j["cs_info"] = cs_info
-        self.command("imagep", j)
+        self.command("imagep", j, block=block)
 
     def process_run(self, args, variant, directory_comment):
         print("")
@@ -151,18 +151,26 @@ class StitcherThread(CommandThreadBase, ArgusThread):
         ok = True
         cs_auto_cli = self.microscope.bc.argus_cs_auto_path()
         simple_cli = self.microscope.bc.argus_stitch_cli()
+        # Plausible stitching configured?
+        cs_info = j.get("cs_info")
+        # Make snapshots quieter since there will be a lot of them
+        ipp = j.get("ipp", {})
+        snapshot = ipp.get("snapshot", False)
+        quiet = ipp.get("quiet", snapshot)
 
-        self.log(f"Process scan: starting {j['directory']}")
+        if not quiet:
+            self.log(f"Process scan: starting {j['directory']}")
 
+        # 2024-03-13: these are doing more harm than good as image processing got more complicated
+        '''
         if not cs_auto_cli and not simple_cli:
             self.log(
                 "Process scan: WARNING: no image processing engines are configured"
             )
-        # Plausible stitching configured?
-        cs_info = j.get("cs_info")
         if not (cs_auto_cli and cs_info or simple_cli):
             self.log(
                 "Process scan: WARNING: no stitching engines are configured")
+        '''
 
         # Run this first in case user wants it to pre-process a scan
         # Originally this only did cloud stitching but now has some other stuff
@@ -183,7 +191,6 @@ class StitcherThread(CommandThreadBase, ArgusThread):
                 ]
 
             args.append(j["directory"])
-            ipp = j["ipp"]
             args.append("--json")
             args.append(json.dumps(ipp))
             ok = ok and self.process_run(args, "cs_auto", j['directory'])
@@ -196,11 +203,13 @@ class StitcherThread(CommandThreadBase, ArgusThread):
             ok = ok and self.process_run(args, "custom CLI", j['directory'])
 
         if ok:
-            if cs_info:
-                self.log(
-                    f"Process scan: processed and uploaded {j['directory']}")
-            else:
-                self.log(f"Process scan: completed {j['directory']}")
+            if not quiet:
+                if cs_info:
+                    self.log(
+                        f"Process scan: processed and uploaded {j['directory']}"
+                    )
+                else:
+                    self.log(f"Process scan: completed {j['directory']}")
         else:
             self.log(f"Process scan: error on {j['directory']}")
 
@@ -275,17 +284,6 @@ class QImageProcessingThread(ImageProcessingThreadBase, ArgusThread):
     def log(self, msg=""):
         self.log_msg.emit(msg)
 
-    def _do_process_image(self, j):
-        image = super()._do_process_image(j)
-        data = {
-            "image": image,
-            "objective_config": j["options"]["objective_config"]
-        }
-        # Don't emit when scripting collects a snapshot
-        if j["options"].get("is_snapshot", False):
-            self.ac.snapshotCaptured.emit(data)
-        return image
-
 
 class QJoystickThread(JoystickThreadBase, ArgusThread):
     log_msg = pyqtSignal(str)
@@ -299,9 +297,10 @@ class QJoystickThread(JoystickThreadBase, ArgusThread):
         self.enabled = False
         self.ac.microscope.statistics.add_getj(self.statistics_getj)
 
-    def shutdown_request(self):
-        self.running.clear()
-        self.enabled = False
+    def shutdown_request(self, phase):
+        if phase == ShutdownPhase.FINAL:
+            self.running.clear()
+            self.enabled = False
 
     def log(self, msg=""):
         self.log_msg.emit(msg)
@@ -627,3 +626,16 @@ class QTaskThread(CommandThreadBase, ArgusThread):
                 delta = (rss - self.rss_last) / 1e6
                 self.microscope.log("Profile: memory usage delta: %0.1f MB" %
                                     (delta, ))
+
+
+class QImagerControlThread(ImagerControlThreadBase, ArgusThread):
+    log_msg = pyqtSignal(str)
+
+    def __init__(self, ac, parent=None):
+        #ArgusThread.__init__(self, ac=ac, parent=parent)
+        ArgusThread.__init__(self, parent=parent)
+        self.ac = ac
+        ImagerControlThreadBase.__init__(self, microscope=self.ac.microscope)
+
+    def log(self, msg=""):
+        self.log_msg.emit(msg)

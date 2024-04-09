@@ -5,6 +5,7 @@ from collections import OrderedDict
 from uscope.cloud_stitch import CSInfo
 from uscope.imager.autofocus import AutoStacker
 from uscope.gui.common import ArgusShutdown
+from uscope.threads import ShutdownPhase
 from uscope.imager.imager_util import format_mm_3dec
 
 from PyQt5 import Qt
@@ -21,9 +22,6 @@ import copy
 import traceback
 import json
 import json5
-"""
-Argus Widget
-"""
 
 
 class AMainWindow(QMainWindow):
@@ -66,7 +64,7 @@ class AMainWindow(QMainWindow):
         for awidget in self.awidgets.values():
             awidget.post_ui_init()
 
-    def _shutdown_request(self):
+    def _shutdown_request(self, phase):
         pass
 
     def _shutdown_join(self):
@@ -83,11 +81,16 @@ class AMainWindow(QMainWindow):
             self.fullscreen_widget.close()
 
         self.cache_save()
-        self._shutdown_request()
-        for awidget in self.awidgets.values():
-            awidget.shutdown_request()
-        if self.ac:
-            self.ac.shutdown_request()
+        for phase in (ShutdownPhase.INITIAL, ShutdownPhase.FINAL):
+            self._shutdown_request(phase=phase)
+            for awidget in self.awidgets.values():
+                awidget.shutdown_request(phase=phase)
+            if self.ac:
+                self.ac.shutdown_request(phase=phase)
+            # Give some token cleanup time
+            # Is there a way we could do this closed loop?
+            if phase != ShutdownPhase.FINAL:
+                time.sleep(0.2)
         self._shutdown_join()
         for awidget in self.awidgets.values():
             awidget.shutdown_join()
@@ -264,16 +267,16 @@ class AWidget(QWidget):
         for awidget in self.awidgets.values():
             awidget.post_ui_init()
 
-    def _shutdown_request(self):
+    def _shutdown_request(self, phase):
         pass
 
-    def shutdown_request(self):
+    def shutdown_request(self, phase):
         """
         Called when GUI is shutting down
         """
-        self._shutdown_request()
+        self._shutdown_request(phase=phase)
         for awidget in self.awidgets.values():
-            awidget.shutdown_request()
+            awidget.shutdown_request(phase=phase)
 
     def _shutdown_join(self):
         pass
@@ -651,6 +654,9 @@ class AdvancedTab(ArgusTab):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self._stacker_pconfig = None
+        self._stabilization_pconfig = None
+        self.stacker_number_le = None
         layout = QGridLayout()
         row = 0
 
@@ -767,15 +773,25 @@ class AdvancedTab(ArgusTab):
         images_pm = int(str(self.stacker_number_le.text()))
         distance_pm = float(self.stacker_distance_le.text())
         if not images_pm or distance_pm == 0.0:
+            self._stacker_pconfig = None
             return
         # +/- but always add the center plane
         images_per_stack = 1 + 2 * images_pm
-        pconfig["points-stacker"] = {
+        stacker_pconfig = {
+            #"relative": "center",
             "number": images_per_stack,
             "distance": 2 * distance_pm,
         }
+        pconfig["points-stacker"] = stacker_pconfig
+        self._stacker_pconfig = stacker_pconfig
         if self.stack_drift_cb.isChecked():
             pconfig["stacker-drift"] = {}
+
+    def stacker_pconfig(self):
+        return self._stacker_pconfig
+
+    def image_stabilization_pconfig(self):
+        return self._stabilization_pconfig
 
     def get_image_stablization(self):
         return self.image_stabilization_cb_map[
@@ -783,15 +799,21 @@ class AdvancedTab(ArgusTab):
 
     def _update_pconfig(self, pconfig):
         image_stabilization = self.get_image_stablization()
+        stabilization_pconfig = None
         if image_stabilization > 1:
-            pconfig["image-stabilization"] = {
+            stabilization_pconfig = {
                 "n": image_stabilization,
             }
+            pconfig["image-stabilization"] = stabilization_pconfig
+        self._stabilization_pconfig = stabilization_pconfig
 
         if self.ac.microscope.has_z():
             self.update_pconfig_stack(pconfig)
 
     def image_stacking_enabled(self):
+        if not self.ac.microscope.has_z():
+            return False
+
         images_pm = int(str(self.stacker_number_le.text()))
         distance_pm = float(self.stacker_distance_le.text())
         if not images_pm or distance_pm == 0.0:
@@ -885,6 +907,14 @@ class AdvancedTab(ArgusTab):
         else:
             assert 0, "unknown mode"
 
+    def _poll_misc(self):
+        # Update caches for snapshot configuration
+        try:
+            tmp_pconfig = {}
+            self._update_pconfig(tmp_pconfig)
+        except ValueError:
+            pass
+
 
 class StitchingTab(ArgusTab):
     def __init__(self, *args, **kwargs):
@@ -976,9 +1006,10 @@ class StitchingTab(ArgusTab):
         self.stitcher_thread.log_msg.connect(self.ac.log)
         self.stitcher_thread.start()
 
-    def _shutdown_request(self):
-        if self.stitcher_thread:
-            self.stitcher_thread.shutdown_request()
+    def _shutdown_request(self, phase):
+        if phase == ShutdownPhase.FINAL:
+            if self.stitcher_thread:
+                self.stitcher_thread.shutdown_request(phase=phase)
 
     def _shutdown_join(self):
         if self.stitcher_thread:

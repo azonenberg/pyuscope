@@ -213,7 +213,7 @@ class DirCSIP:
         tb.wait()
 
     def hdr_run(self, **kwargs):
-        self.run_n_to_1(task_name="hdr-enfuse", bucket_name="hdr", **kwargs)
+        self.run_n_to_1(task_name="hdr-luminance", bucket_name="hdr", **kwargs)
 
     def stack_run(self, **kwargs):
         self.run_n_to_1(task_name="stack-enfuse",
@@ -244,6 +244,13 @@ class DirCSIP:
         print("Microscope: %s" % (self.microscope.name, ))
         print("Serial: %s" % (self.microscope.serial(), ))
         print("Has FF cal: %s" % config.get_usc().imager.has_ff_cal())
+        print("Options")
+        print("  Keep intermediates:", self.ipp_config.keep_intermediates())
+        print("  Write HTML viewer:", self.ipp_config.write_html_viewer())
+        print("  Write snapshot grid:", self.ipp_config.write_snapshot_grid())
+        print("  Write quick pano:", self.ipp_config.write_quick_pano())
+        print("  Snapshot correction:", self.ipp_config.snapshot_correction())
+        print("  Cloud stitch:", self.ipp_config.cloud_stitch())
 
         self.log("")
 
@@ -380,6 +387,7 @@ class DirCSIP:
         if not self.ipp_config.keep_intermediates():
             remove_intermediate_directories(self.directory,
                                             working_iindex["dir"])
+            print(f"Clean up intermediates: {next_dir} => {self.directory}")
             next_dir = self.directory
             working_iindex = index_scan_images(next_dir)
 
@@ -434,13 +442,13 @@ class DirCSIP:
 class SnapshotCSIP:
     def __init__(self,
                  csip,
-                 images,
+                 image,
                  best_effort=True,
                  microscope=None,
                  verbose=False):
         self.csip = csip
         self.log = csip.log
-        self.images = images
+        self.image = image
         self.best_effort = best_effort
         self.verbose = verbose
         self.microscope = microscope
@@ -454,7 +462,7 @@ class SnapshotCSIP:
             "Has FF cal: %s" % config.get_usc().imager.has_ff_cal())
 
         self.verbose and self.log("")
-
+        '''
         current_images = self.images
 
         if len(current_images) > 1:
@@ -475,9 +483,11 @@ class SnapshotCSIP:
                                                  tb=tb)
             tb.wait()
             current_images = data_out["image"].get_im()
+        '''
 
-        assert len(current_images) == 1
-        current_image = current_images[0]
+        current_image = self.image
+        capim = options["captured_image"]
+        self.microscope.imager.add_captured_image_meta(capim)
 
         ipp = config.get_usc().ipp.snapshot_correction()
         current_plugins = [p["plugin"] for p in ipp]
@@ -522,8 +532,7 @@ Constructs a pipeline based on expected input data
 Expects all images to be present
 If it fails you'll need to fall back to DirCSIP
 """
-
-
+'''
 class StreamCSIP:
     def __init__(self, csip, image_stream, microscope=None, upload=False):
         assert 0, "WIP"
@@ -670,3 +679,4 @@ class StreamCSIP:
                                     dst_basename=dst_basename,
                                     verbose=verbose)
             """
+'''

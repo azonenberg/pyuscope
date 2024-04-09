@@ -517,6 +517,9 @@ class USCMotion:
 
         return ret
 
+    def backlash_wiggle(self):
+        return bool(self.j.get("backlash_wiggle", False))
+
     def origin(self):
         """
         Where the coordinate system starts from
@@ -662,6 +665,13 @@ class USCKinematics:
         """
         # Set a semi-reasonable default
         return float(self.j.get("tsettle_hdr", 0.2))
+
+    def hdr_closed_loop(self):
+        """
+        Wait for property to read back before snapping image?
+        Otherwise can run open loop / with timing
+        """
+        return bool(self.j.get("hdr_closed_loop", False))
 
     def frame_sync(self):
         # Recommended for real imagers
@@ -1163,6 +1173,12 @@ class PC:
         ret = self.j.get("motion", {}).get("origin", "ll")
         assert ret in ("ll", "ul"), "Invalid coordinate origin"
         return ret
+
+    def xy_pattern(self):
+        return self.j.get("xy-pattern", None)
+
+    def xy_sepentine(self):
+        return self.j.get("xy-serpentine", None)
 
     def x_view(self):
         return float(self.j["imager"]["x_view"])
