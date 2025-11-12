@@ -9,7 +9,7 @@ A minimal configuration to do basic testing
         "tsettle_motion_na1": 0.1,
         //2023-09-04: 0.1 seems tight w/o real tuning, increase 0.1 => 0.2
         //suspect NA delay is actually helping us here, lower it in favor of fixed delay here
-        "tsettle_motion_base": 0.3,
+        "tsettle_motion_base": 0.5,
         //2023-09-04: saw miss at 0.2
         "tsettle_hdr": 0.3,
     },
@@ -206,6 +206,12 @@ A minimal configuration to do basic testing
         {
 			"camera_sn": "TP230221161310F5C01079C0DE4CAA5",
 			"objectives": [
+				{
+                    "magnification": 1.0,
+                    "na": 0.025,
+                    "name": "M Plan Apo 1X",
+                    "um_per_pixel": 4.765,
+                },
                 {
                     "magnification": 5.0,
                     "na": 0.14,
@@ -229,6 +235,13 @@ A minimal configuration to do basic testing
                     "na": 0.90,
                     "name": "Neo SPlan 100x",
                     "um_per_pixel": 0.04248,
+                },
+
+                {
+                    "magnification": 100.0,
+                    "na": 0.90,
+                    "name": "M Plan Apo 100x",
+                    "um_per_pixel": 0.04711,
                 },
                 
             ],
