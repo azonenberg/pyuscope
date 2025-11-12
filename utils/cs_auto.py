@@ -76,7 +76,7 @@ def main():
         default=True,
         help="Best effort in lieu of crashing on error (ex: stack failure)")
     add_bool_arg(parser, "--quick-pano", default=None, help="")
-    parser.add_argument("--threads", default=None)
+    parser.add_argument("--threads", default=None, type=int)
     parser.add_argument("--access-key")
     parser.add_argument("--secret-key")
     parser.add_argument("--id-key")
