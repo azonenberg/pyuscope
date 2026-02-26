@@ -161,7 +161,8 @@ class MicroscopeObjectives:
         self.objectives = OrderedDict()
         for objectivei, objective in enumerate(objectives_list):
             name = self.name_objective(objective, objectivei)
-            assert name not in self.objectives
+            if name in self.objectives:
+                raise ValueError(f"Objective '{name}' duplicated. Check there isn't another objective with the same Series and Magnification, or the same name.")
             self.objectives[name] = objective
 
         # Now apply system specific sizing / calibration

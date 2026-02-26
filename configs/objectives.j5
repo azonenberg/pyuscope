@@ -375,7 +375,7 @@ In practice these are mechanically compatible
         {
             "vendor": "Olympus",
             "model": "ULWD MSPlan 50X",
-            "series": "MSPlan",
+            "series": "MSPlan ULWD",
             "magnification": 50,
             "na": 0.55,
             "thread": "RMS",
