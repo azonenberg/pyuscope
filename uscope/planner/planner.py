@@ -91,11 +91,11 @@ class Planner:
         else:
             self.motion = motion
         if not self.motion:
-            self.log("WARNING: no mention")
+            self.log("WARNING: no motion")
         self.pc.motion.set_axes_meta(self.motion.axes())
 
         self.imager = imager
-        if not self.motion:
+        if not self.imager:
             self.log("WARNING: no imager")
 
         self.microscope = microscope
@@ -362,7 +362,7 @@ class Planner:
     Convenience functions
     """
 
-    def filanme_prefix(self, state):
+    def filename_prefix(self, state):
         return os.path.join(self.out_dir, "_".join(state["filename_parts"]))
 
     def register_progress_callback(self, callback):

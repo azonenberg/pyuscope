@@ -55,7 +55,7 @@ class Kinematics:
         self.tsettle_autofocus = tsettle_autofocus
 
     def sleep(self, t):
-        self.verbose and self.log("kinematics sleep", t)
+        self.verbose and self.log("kinematics sleep %0.3f" % t)
         time.sleep(t)
 
     def wait_video_pipeline(self):

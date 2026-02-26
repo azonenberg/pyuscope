@@ -110,17 +110,14 @@ class ManagedTempDir(ManagedTempFile):
 
 
 class TempFileSet:
-    prefix = None
-    files = list()
+    def __init__(self, prefix=None):
+        if not prefix:
+            prefix = TempFile.default_prefix()
+        self.prefix = prefix
+        self.files = []
 
     def get_file(self):
         pass
 
     def get_dir(self):
         pass
-
-    @staticmethod
-    def get(prefix=None):
-        if not prefix:
-            prefix = TempFile.default_prefix()
-        self.prefix = prefix

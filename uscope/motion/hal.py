@@ -46,8 +46,10 @@ def pos_str(pos):
 def sign(delta):
     if delta > 0:
         return +1
-    else:
+    elif delta < 0:
         return -1
+    else:
+        return 0
 
 
 # An un-recoverable error
@@ -154,7 +156,7 @@ class BacklashMM(MotionModifier):
         for axis in self.motion.axes():
             self.enabled[axis] = val
 
-    def set_compendsation(self, compensation):
+    def set_compensation(self, compensation):
         self.compensation = compensation
         self.compensated = {}
 
@@ -313,7 +315,6 @@ class BacklashMM(MotionModifier):
     def move_x_pre(self, dst_abs_pos, options={}):
         if self.recursing:
             return
-        print("piggly wiggly", self.wiggle)
         if self.wiggle:
             self.move_x_pre_wiggle(dst_abs_pos=dst_abs_pos, options=options)
         else:

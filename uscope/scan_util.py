@@ -75,7 +75,7 @@ def iindex_parse_fn(basename):
     # dummy part for image.jpg type name
     if parts == "image":
         ret["singleton"] = True
-        return
+        return ret
 
     for part in parts.split("_"):
         m = re.match(r"c([0-9]+)", part)
