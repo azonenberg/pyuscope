@@ -546,7 +546,7 @@ class XYPosGenerator:
         if self.pattern is None:
             self.pattern = XYPattern.XM_XP
         self.pattern = XYPattern(self.pattern)
-        self.serpentine = pc.xy_sepentine()
+        self.serpentine = pc.xy_serpentine()
         # Faster but less precise
         if self.serpentine is None:
             self.serpentine = True
@@ -1254,7 +1254,7 @@ class PlannerSaveImage(PlannerPlugin):
             assert im, "Asked to save image without image given"
 
         self.images_saved += 1
-        img_prefix = self.planner.filanme_prefix(state)
+        img_prefix = self.planner.filename_prefix(state)
         fn_full = img_prefix + self.extension
         if not self.planner.dry:
             # PIL object

@@ -185,7 +185,7 @@ class USCImager:
         if tmp:
             for k in list(tmp.keys()):
                 if k not in ("top", "bottom", "left", "right"):
-                    raise ValueError("Unexpected key" % (k, ))
+                    raise ValueError("Unexpected key: %s" % (k, ))
                 ret[k] = int(tmp.get(k, 0))
             return ret
         # Convert config based on fraction of sensor size
@@ -198,7 +198,7 @@ class USCImager:
                 elif k in ("left", "right"):
                     ret[k] = int(tmp.get(k, 0.0) * w)
                 else:
-                    raise ValueError("Unexpected key" % (k, ))
+                    raise ValueError("Unexpected key: %s" % (k, ))
             return ret
         return None
 
@@ -829,7 +829,7 @@ class USC:
 
     @staticmethod
     def has_default_microscope_name():
-        return bool(USC.default_microscope.name)
+        return bool(USC.default_microscope_name)
 
     def __init__(self, usj=None, microscope=None, config_dir=None):
         # Crude microscope object defining name + serial number
@@ -1177,7 +1177,7 @@ class PC:
     def xy_pattern(self):
         return self.j.get("xy-pattern", None)
 
-    def xy_sepentine(self):
+    def xy_serpentine(self):
         return self.j.get("xy-serpentine", None)
 
     def x_view(self):

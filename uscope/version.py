@@ -50,7 +50,7 @@ def get_meta():
     # ignore if extra config files
     ret["dirty"] = check_output(
         ["git", "status", "--untracked-files=no", "--porcelain"],
-        stderr=subprocess.DEVNULL).strip().strip() != 0
+        stderr=subprocess.DEVNULL).strip() != ""
 
     description = f"{tag}"
     if ret["dirty"] or ret["githash"] != tag_githash:
