@@ -715,6 +715,8 @@ def template_property(vidpip, ac, prop_entry):
 
     ret = {}
     ps = vidpip.source.find_property(prop_name)
+    if ps is None:
+        raise ValueError(f"Property '{prop_name}' not found")
     ret["prop_name"] = prop_name
     ret["default"] = ps.default_value
 
